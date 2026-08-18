@@ -7,13 +7,10 @@ changed.
 
 It is not a dashboard. Dashboards were the problem.
 
-> **Status: all five stages complete.**
-> Collection, change detection, the evidence-bound brief, the Discord sink, the
-> systemd units and the Alertmanager adapter all exist and have been run.
-> `watchdesk replay` reproduces the August incident and its resolution from two
-> real captures; a round against a real Docker daemon runs in CI via
-> `tests/fake-stack/`. Nothing in this README describes behaviour that is not
-> in the tree.
+It runs on one machine — mine — and every number in this README came off it.
+The incident below is real, the fixtures are the real logs from it (redacted),
+and `watchdesk replay` reproduces the finding from them. Nothing here describes
+behaviour that is not in the tree.
 
 ## Why it exists
 
@@ -117,28 +114,29 @@ meant to be — it watches one machine.
 
 ```
 src/watchdesk/
-  cli.py              once / serve / replay / doctor            [stage 1]
-  config.py           pydantic-settings: .env + YAML            [stage 1]
+  cli.py              once / serve / replay / doctor
+  config.py           pydantic-settings: .env + YAML
   sources/
-    base.py           Signal dataclass + SignalSource protocol  [stage 1]
-    shell.py          allowlisted read-only command runner      [stage 1]
-    dockerlog.py      json-file reader; never uses --since      [stage 1] DONE
-    fail2ban.py       the core; see below                       [stage 1] DONE
-    postfix.py        SASL failure rate, queue depth, sent rate [stage 1] DONE
-    dovecot.py        login activity + log_path/auth_verbose    [stage 1] DONE
-    docker_state.py   health, restart counts, OOM kills         [stage 2] DONE
-    tls_cert.py       days to certificate expiry                DONE
-    disk.py           disk and inode headroom + fill projection DONE
-    alertmanager.py   webhook payload -> Signal adapter         [stage 5] DONE
+    base.py           Signal dataclass + SignalSource protocol
+    shell.py          allowlisted read-only command runner
+    dockerlog.py      json-file reader; never uses --since
+    fail2ban.py       the core; see below
+    postfix.py        SASL failure rate, queue depth, sent rate
+    dovecot.py        login activity + log_path/auth_verbose
+    docker_state.py   health, restart counts, OOM kills
+    tls_cert.py       days to certificate expiry
+    disk.py           disk and inode headroom + fill projection
+    alertmanager.py   webhook payload -> Signal adapter
   detect/
-    state.py          SQLite snapshot history                   [stage 2] DONE
-    rules.py          thresholds, rate-of-change, silence       [stage 2] DONE
-  correlate.py        anomaly x recent change                   [stage 2] DONE
-  redact.py           IP / hostname / mailbox / path            [stage 0] DONE
-  leakcheck.py        independent exit check; runtime + CI      [stage 3] DONE
-  llm.py              OpenAI-compatible client                  [stage 3] DONE
-  brief.py            triage summary with evidence binding      [stage 3] DONE
-  sinks/              discord, stdout, repeat suppression       [stage 4] DONE
+    state.py          SQLite snapshot history
+    rules.py          thresholds, rate-of-change, silence
+  correlate.py        anomaly x recent change
+  fixtures.py         loads a capture, scoped to what it can answer
+  redact.py           IP / hostname / mailbox / path
+  leakcheck.py        independent exit check; runtime + CI
+  llm.py              OpenAI-compatible client
+  brief.py            triage summary with evidence binding
+  sinks/              discord, stdout, repeat suppression
 ```
 
 The collection logic is lifted from `audit.sh`, a read-only scan script I
@@ -231,7 +229,7 @@ one — which is the exact confusion the whole project is about.
 
 Findings carry the signals they rest on, the evidence under those signals, and
 a confidence marker that is `observed` or `derived`. Rules never produce
-`hypothesis`; that value exists so stage 3 has somewhere to put an LLM's
+`hypothesis`; that value exists so `brief.py` has somewhere to put an LLM's
 explanation without it being mistaken for a measurement.
 
 ### Correlation
@@ -378,7 +376,23 @@ The acceptance test is the one that matters:
 watchdesk --config config/watchdesk.example.yaml replay tests/fixtures/2026-08-fail2ban-gap/
 ```
 
-Fed the real logs from the incident, watchdesk reports:
+Fed the real logs from the incident:
+
+```
+[CRITICAL] postfix-docker is blind to 210 authentication failures on submission/smtpd
+  rule: fail2ban.uncounted_failures  confidence: derived
+  210 of 212 authentication failures in this window are present in the log the
+  jail reads and are not matched by the filter it uses. Coverage 0.0094. By
+  listener — submission/smtpd: 210. The jail's own view is corroborated
+  independently: watchdesk applying the on-disk failregex sees 6 matching
+  lines, fail2ban-regex sees 6, and the running fail2ban logged 6 Found
+  events. Those agreeing is what rules out an error in watchdesk's own matcher.
+  evidence[log_line] postfix:json-log:103
+    {"log":"Jul 31 01:40:27 mail.example.com postfix/submission/smtpd[9152]: warning:
+     unknown[ip:76d72b]: SASL LOGIN authentication failed ...
+```
+
+Add `--signals` for the numbers underneath it:
 
 ```
 fail2ban.jail.observed_failures{jail=postfix-docker}                       212
@@ -403,12 +417,14 @@ that same day. The three independent counts agreeing at six is what makes the
 ### Change detection, across two real days
 
 ```bash
-watchdesk --config config/watchdesk.example.yaml replay \
+watchdesk --config config/watchdesk.example.yaml replay --all-rounds \
   tests/fixtures/2026-08-fail2ban-gap/ tests/fixtures/2026-08-fail2ban-fixed/
 ```
 
 Two captures from adjacent days — the day the jail was blind, and the day the
-filter was corrected — replayed in order through one history:
+filter was corrected — replayed in order through one history. (Without
+`--all-rounds` only the last round is reported; the earlier ones exist to build
+the baseline, and printing them all buries the one you asked about.)
 
 ```
 [CRITICAL] postfix-docker is blind to 210 authentication failures on submission/smtpd
