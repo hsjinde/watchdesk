@@ -17,11 +17,13 @@ from datetime import datetime
 from .config import Config
 from .sources.alertmanager import AlertmanagerSource
 from .sources.base import Signal, SignalKind, SignalSource, SourceContext, utcnow
+from .sources.disk import DiskSource
 from .sources.docker_state import DockerStateSource
 from .sources.dovecot import DovecotSource
 from .sources.fail2ban import Fail2banSource
 from .sources.postfix import PostfixSource
 from .sources.shell import AllowlistRunner, CommandRunner
+from .sources.tls_cert import TlsCertSource
 
 __all__ = ["Round", "default_sources", "run_round"]
 
@@ -32,6 +34,8 @@ ALL_SOURCES: dict[str, type] = {
     "dovecot": DovecotSource,
     "docker_state": DockerStateSource,
     "alertmanager": AlertmanagerSource,
+    "disk": DiskSource,
+    "tls_cert": TlsCertSource,
 }
 
 

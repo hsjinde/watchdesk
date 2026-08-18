@@ -337,6 +337,7 @@ def main() -> int:
         "name": out.name,
         "as_of": f"{day}T23:59:59Z",
         "window_minutes": 1440,
+        "sources": ["fail2ban", "postfix", "dovecot", "docker_state"],
         "captured_from": "a single self-hosted mail server, redacted at capture time",
         "provenance": {
             "genuine_redacted": [

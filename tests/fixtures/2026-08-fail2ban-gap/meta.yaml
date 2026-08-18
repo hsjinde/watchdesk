@@ -3,6 +3,16 @@
 name: 2026-08-fail2ban-gap
 as_of: '2026-07-31T23:59:59Z'
 window_minutes: 1440
+
+# What this capture can answer for. A source with no recording here was never
+# in scope for it, and must not be run: it would report errors about data that
+# was never captured, or — worse — zeros, making the replay look healthier than
+# the incident it contains.
+sources:
+  - fail2ban
+  - postfix
+  - dovecot
+  - docker_state
 captured_from: a single self-hosted mail server, redacted at capture time
 provenance:
   genuine_redacted:

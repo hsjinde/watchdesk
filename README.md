@@ -127,8 +127,8 @@ src/watchdesk/
     postfix.py        SASL failure rate, queue depth, sent rate [stage 1] DONE
     dovecot.py        login activity + log_path/auth_verbose    [stage 1] DONE
     docker_state.py   health, restart counts, OOM kills         [stage 2] DONE
-    tls_cert.py       days to certificate expiry                via alertmanager
-    disk.py           disk and inode headroom                   via alertmanager
+    tls_cert.py       days to certificate expiry                DONE
+    disk.py           disk and inode headroom + fill projection DONE
     alertmanager.py   webhook payload -> Signal adapter         [stage 5] DONE
   detect/
     state.py          SQLite snapshot history                   [stage 2] DONE
@@ -619,6 +619,45 @@ failed send is not recorded as sent, so the next round tries again.
 
 `replay` can never notify. It accepts `--sink stdout` only, so no rehearsal of
 a past incident can page anybody.
+
+## Disk and certificates
+
+Both of these are easy to write as a percentage against a round number, and
+both are much more useful when the threshold comes from how the underlying
+thing behaves.
+
+**Disk.** The level is the boring half. 95% that has been 95% for six months is
+a fact about the machine; 95% that was 91% an hour ago is a few hours from an
+outage, and only the second is worth waking anybody. Telling them apart needs
+history, which is why free *bytes* are recorded next to the percentage — a
+percentage cannot be differentiated into a rate that means anything. The
+projection is a straight line through two samples and says so in the finding;
+it is refused entirely when the samples are less than fifteen minutes apart,
+because a log rotation inside a short gap implies the disk fills before lunch.
+Inodes get their own signals: they run out independently and produce a
+disk-full error on a filesystem with room left.
+
+**Certificates.** Nothing fires at 30 days, because 30 days is certbot's
+renewal window opening — not news. Below 21, a renewal has already run and
+failed, or has not run at all. Below 7 it is a real deadline. Alerting at 30
+would teach the reader that this signal is noise, and then the one at 5 days
+gets ignored too. A certificate that cannot be *read* is an error rather than a
+pass: renewal writes a new file, and a missing one afterwards is exactly the
+failure this source exists to notice.
+
+On the host this was built for, the first round with `disk` enabled produced a
+finding immediately:
+
+```
+[CRITICAL] / is 97% full (space)
+  rule: disk.space_low  confidence: observed
+  A level, not a trend. See the fill projection for whether it is moving.
+  evidence[command_output] df -P -k
+    /dev/vda2 15053048/16428244 (97%) on /
+```
+
+while the certificate source stayed quiet at 34 days — which is the result
+that matters for a tool whose silence is supposed to mean something.
 
 ## Everything else, through Alertmanager
 

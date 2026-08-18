@@ -9,6 +9,20 @@
 # webhook come from the environment (.env, or systemd's EnvironmentFile).
 
 # Container names default to the mail stack's compose service names.
+# Which sources run. Naming them explicitly means a deployment without
+# fail2ban, or one that only watches containers, does not have to pretend the
+# missing pieces are healthy.
+#   available: fail2ban, postfix, dovecot, docker_state, disk, tls_cert,
+#              alertmanager
+sources:
+  - fail2ban
+  - postfix
+  - dovecot
+  - docker_state
+  - disk
+  # - tls_cert      # needs tls.cert_paths below
+  # - alertmanager  # needs a spool; see below
+
 containers:
   postfix: postfix
   dovecot: dovecot
@@ -50,6 +64,29 @@ fail2ban:
   # takes tens of seconds; turn it off if a round has to be cheap, and accept
   # that you lose the fourth opinion.
   run_fail2ban_regex: true
+
+# Disk and inode headroom. Levels are the boring half; the useful half is the
+# fill projection, which needs history — see `disk.filling` in detect/rules.py.
+disk:
+  ignore_filesystems: [tmpfs, devtmpfs, overlay, squashfs, efivarfs, udev]
+  warn_percent: 90
+  critical_percent: 95
+  projection_hours: 72
+
+# Certificates to check. Empty by default: guessing paths gives you either
+# false alarms or a source that silently checks nothing.
+#
+# For the mail stack the certificate lives inside the certbot volume, e.g.
+#   /var/lib/docker/volumes/postfixmanager_letsencrypt/_data/live/<domain>/cert.pem
+#
+# Thresholds are tied to how renewal works rather than to round numbers: Let's
+# Encrypt lasts 90 days and certbot renews at 30 remaining, so 21 days means a
+# renewal has already failed unnoticed. Alerting at 30 would fire on the
+# renewal window merely opening.
+tls:
+  cert_paths: []
+  warn_days: 21
+  critical_days: 7
 
 # Alertmanager webhooks, for everything watchdesk does not measure itself —
 # node exporter, blackbox probes, certificate expiry. watchdesk does NOT listen
@@ -122,6 +159,10 @@ shell:
     - [docker, inspect, --format, "{{.RestartCount}}", "*"]
     - [df, -P, -k]
     - [df, -P, -i]
+    # Reads a certificate's expiry. The wildcard stands for one path, and the
+    # paths that get passed are the ones listed under `tls.cert_paths` below —
+    # the allowlist is the mechanism, that list is the policy.
+    - [openssl, x509, -in, "*", -noout, -enddate, -subject]
 
   containers:
     postfix:

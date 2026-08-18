@@ -17,20 +17,18 @@ that flags everything during an incident has told nobody anything.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-import yaml
 
 from watchdesk.collect import run_round
 from watchdesk.config import load_config
 from watchdesk.correlate import correlate
 from watchdesk.detect.rules import Severity, evaluate
 from watchdesk.detect.state import StateStore
+from watchdesk.fixtures import open_fixture
 from watchdesk.leakcheck import assert_clean
 from watchdesk.redact import RedactionPolicy, Redactor
-from watchdesk.sources.shell import RecordedRunner
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GAP = FIXTURES / "2026-08-fail2ban-gap"
@@ -39,10 +37,7 @@ CONFIG = Path(__file__).parent.parent / "config" / "watchdesk.example.yaml"
 
 
 def _run(fixture: Path, config, store: StateStore):
-    meta = yaml.safe_load((fixture / "meta.yaml").read_text(encoding="utf-8"))
-    now = datetime.fromisoformat(str(meta["as_of"]).replace("Z", "+00:00")).astimezone(timezone.utc)
-    round_config = config.model_copy(update={"window_minutes": meta["window_minutes"]})
-    runner = RecordedRunner(fixture, allowlist=round_config.shell.to_allowlist())
+    runner, now, round_config = open_fixture(fixture, config)
     result = run_round(round_config, runner=runner, now=now)
     findings = evaluate(round_config, result.signals, store, now)
     findings = correlate(round_config, findings, result.signals, store, now)

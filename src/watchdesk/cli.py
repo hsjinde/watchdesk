@@ -9,19 +9,18 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
-
 from .brief import Brief, build_brief
 from .collect import Round, run_round
 from .config import Config, load_config
 from .correlate import correlate
 from .detect.rules import Finding, evaluate
 from .detect.state import StateStore
+from .fixtures import load_meta, open_fixture
 from .llm import LLMError, RecordedLLM, build_client
 from .redact import Redactor
 from .sinks import DiscordSink
 from .sources.base import Signal, SignalKind
-from .sources.shell import AllowlistRunner, RecordedRunner
+from .sources.shell import AllowlistRunner
 
 __all__ = ["main"]
 
@@ -29,31 +28,6 @@ __all__ = ["main"]
 #: the Signal for the brief to quote; this is only about readability.
 _EXCERPT_LINES = 3
 _EXCERPT_WIDTH = 200
-
-
-def _fixture_meta(fixture: Path) -> dict:
-    meta_path = fixture / "meta.yaml"
-    return yaml.safe_load(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-
-
-def _fixture_context(fixture: Path, config: Config) -> tuple[RecordedRunner, datetime, Config]:
-    """Load a recorded incident and pin the clock to when it happened.
-
-    Without this the window would be measured from *now* and every recorded
-    line would fall outside it — the replay would come back empty and look
-    like a clean bill of health.
-    """
-    meta = _fixture_meta(fixture)
-    as_of = meta.get("as_of")
-    now = (
-        datetime.fromisoformat(str(as_of).replace("Z", "+00:00")).astimezone(timezone.utc)
-        if as_of
-        else datetime.now(timezone.utc)
-    )
-    if meta.get("window_minutes"):
-        config = config.model_copy(update={"window_minutes": int(meta["window_minutes"])})
-    runner = RecordedRunner(fixture, allowlist=config.shell.to_allowlist())
-    return runner, now, config
 
 
 def _print_signals(signals: list[Signal]) -> None:
@@ -202,7 +176,7 @@ def _cmd_once(args: argparse.Namespace) -> int:
         config = config.model_copy(update={"window_minutes": args.window})
 
     if args.fixture:
-        runner, now, config = _fixture_context(Path(args.fixture), config)
+        runner, now, config = open_fixture(Path(args.fixture), config)
         label = Path(args.fixture).name
     else:
         runner = AllowlistRunner(config.shell.to_allowlist(), timeout_s=config.shell.timeout_s)
@@ -233,14 +207,14 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     fixtures = sorted(
         (Path(path) for path in args.fixture_dir),
-        key=lambda path: str(_fixture_meta(path).get("as_of", path.name)),
+        key=lambda path: str(load_meta(path).get("as_of", path.name)),
     )
     # Replays default to an in-memory history so that running the acceptance
     # test never writes to, or reads from, the operator's real state file.
     store = StateStore(args.state_db or ":memory:") if not args.no_state else None
     try:
         for index, fixture in enumerate(fixtures):
-            runner, now, round_config = _fixture_context(fixture, config)
+            runner, now, round_config = open_fixture(fixture, config)
             result = run_round(round_config, runner=runner, now=now)
             findings = _analyse(round_config, result, store, now, fixture.name)
             if len(fixtures) > 1:

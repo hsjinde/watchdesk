@@ -105,6 +105,7 @@ class ShellConfig(BaseModel):
             ["docker", "inspect", "--format", "{{.RestartCount}}", "*"],
             ["df", "-P", "-k"],
             ["df", "-P", "-i"],
+            ["openssl", "x509", "-in", "*", "-noout", "-enddate", "-subject"],
         ]
     )
     containers: dict[str, list[list[str]]] = Field(
@@ -184,6 +185,34 @@ class RulesConfig(BaseModel):
     critical_on_spike: list[str] = Field(
         default_factory=lambda: ["postfix.messages_sent", "postfix.queue_depth"]
     )
+
+
+class DiskConfig(BaseModel):
+    #: Pseudo-filesystems that are always "full" or always empty and mean
+    #: nothing either way.
+    ignore_filesystems: list[str] = Field(
+        default_factory=lambda: ["tmpfs", "devtmpfs", "overlay", "squashfs", "efivarfs", "udev"]
+    )
+    warn_percent: int = 90
+    critical_percent: int = 95
+
+    #: Report a projected fill only when it lands inside this horizon. Beyond
+    #: it the extrapolation says more about the noise in two samples than about
+    #: the disk.
+    projection_hours: int = 72
+
+
+class TlsConfig(BaseModel):
+    #: Certificate files to check. Empty by default: guessing paths produces
+    #: either false alarms or a source that silently checks nothing.
+    cert_paths: list[str] = Field(default_factory=list)
+
+    #: Tied to how renewal works, not to round numbers. Let's Encrypt lasts 90
+    #: days and certbot renews at 30 remaining, so 21 means a renewal has
+    #: already failed unnoticed. Alerting at 30 would fire on the renewal
+    #: window merely opening, and teach the reader to ignore this signal.
+    warn_days: int = 21
+    critical_days: int = 7
 
 
 class AlertmanagerConfig(BaseModel):
@@ -274,6 +303,8 @@ class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     sink: SinkConfig = Field(default_factory=SinkConfig)
     alertmanager: AlertmanagerConfig = Field(default_factory=AlertmanagerConfig)
+    disk: DiskConfig = Field(default_factory=DiskConfig)
+    tls: TlsConfig = Field(default_factory=TlsConfig)
 
     #: Which sources run. Named explicitly so a deployment without fail2ban,
     #: or a test running only against containers, does not have to pretend the
@@ -281,7 +312,7 @@ class Config(BaseModel):
     #: default: a spool directory that does not exist is a normal state, not a
     #: fault, and enabling a source that reports nothing is how a gap hides.
     sources: list[str] = Field(
-        default_factory=lambda: ["fail2ban", "postfix", "dovecot", "docker_state"]
+        default_factory=lambda: ["fail2ban", "postfix", "dovecot", "docker_state", "disk"]
     )
 
     #: How long `watchdesk serve` waits between rounds. The systemd timer is

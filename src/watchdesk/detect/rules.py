@@ -367,6 +367,125 @@ def rule_external_alert(ctx: RuleContext) -> Iterable[Finding]:
         )
 
 
+def rule_disk_pressure(ctx: RuleContext) -> Iterable[Finding]:
+    """Space and inodes, as levels."""
+    limits = ctx.config.disk
+    checks = (
+        ("disk.used_percent", "space", "disk.available_kb"),
+        ("disk.inodes_used_percent", "inodes", None),
+    )
+    for name, what, _ in checks:
+        for signal in ctx.by_name.get(name, []):
+            used = signal.value
+            if not isinstance(used, (int, float)):
+                continue
+            if used >= limits.critical_percent:
+                severity = Severity.CRITICAL
+            elif used >= limits.warn_percent:
+                severity = Severity.WARNING
+            else:
+                continue
+            mount = signal.labels.get("mount", "?")
+            yield Finding(
+                rule=f"disk.{what}_low",
+                severity=severity,
+                confidence=Confidence.OBSERVED,
+                title=f"{mount} is {used:g}% full ({what})",
+                detail=(
+                    "Inodes run out independently of space and produce a disk-full error on a "
+                    "filesystem with room left."
+                    if what == "inodes"
+                    else "A level, not a trend. See the fill projection for whether it is moving."
+                ),
+                labels=dict(signal.labels),
+                evidence=tuple(signal.evidence),
+                signal_keys=(signal.key,),
+            )
+
+
+def rule_disk_filling(ctx: RuleContext) -> Iterable[Finding]:
+    """How fast it is filling, which is the part worth waking up for.
+
+    95% that has been 95% for six months is a fact about the machine. 95% that
+    was 91% an hour ago is a few hours from an outage. A level cannot tell
+    those apart, and this is the whole reason free bytes are recorded next to
+    the percentage — a percentage cannot be differentiated into a useful rate.
+    """
+    if ctx.store is None:
+        return
+    horizon = ctx.config.disk.projection_hours
+    for signal in ctx.by_name.get("disk.available_kb", []):
+        current = signal.value
+        previous = ctx.previous(signal.key)
+        if not isinstance(current, (int, float)) or previous is None or previous.number is None:
+            continue
+        elapsed_hours = (ctx.now - previous.observed_at).total_seconds() / 3600
+        # Two samples minutes apart extrapolate to nonsense; a log rotation
+        # inside a short gap can imply the disk fills before lunch.
+        if elapsed_hours < 0.25:
+            continue
+        rate = (previous.number - current) / elapsed_hours
+        if rate <= 0:
+            continue
+        hours_left = current / rate
+        if hours_left > horizon:
+            continue
+        mount = signal.labels.get("mount", "?")
+        yield Finding(
+            rule="disk.filling",
+            severity=Severity.CRITICAL if hours_left <= 12 else Severity.WARNING,
+            confidence=Confidence.DERIVED,
+            title=f"{mount} is filling: about {hours_left:.1f}h of space left at the current rate",
+            detail=(
+                f"{previous.number:,.0f} KiB free became {current:,.0f} KiB over "
+                f"{elapsed_hours:.1f}h — {rate:,.0f} KiB/hour. Straight-line from two samples, "
+                "so treat the hour figure as an order of magnitude, not a deadline."
+            ),
+            labels=dict(signal.labels),
+            evidence=tuple(signal.evidence),
+            signal_keys=(signal.key,),
+            baseline=f"previous reading at {previous.observed_at.isoformat()}",
+        )
+
+
+def rule_certificate_expiry(ctx: RuleContext) -> Iterable[Finding]:
+    """Expiry, measured against how renewal actually works.
+
+    Nothing fires at 30 days, because 30 days is the renewal window opening —
+    not news. Below 21, a renewal has already failed and nobody noticed.
+    """
+    limits = ctx.config.tls
+    for signal in ctx.by_name.get("tls.days_to_expiry", []):
+        days = signal.value
+        if not isinstance(days, (int, float)):
+            continue
+        if days <= limits.critical_days:
+            severity = Severity.CRITICAL
+        elif days <= limits.warn_days:
+            severity = Severity.WARNING
+        else:
+            continue
+        cert = signal.labels.get("cert", "?")
+        yield Finding(
+            rule="tls.expiring",
+            severity=severity,
+            confidence=Confidence.OBSERVED,
+            title=(
+                f"{cert} expires in {days:.1f} days"
+                if days > 0
+                else f"{cert} expired {abs(days):.1f} days ago"
+            ),
+            detail=(
+                "certbot renews at 30 days remaining, so anything below that means a renewal "
+                "has already run and failed, or has not run at all. Check the renewal timer "
+                "before the certificate."
+            ),
+            labels=dict(signal.labels),
+            evidence=tuple(signal.evidence),
+            signal_keys=(signal.key,),
+        )
+
+
 def rule_collection_errors(ctx: RuleContext) -> Iterable[Finding]:
     """A collector that could not see is not a collector that saw nothing."""
     errors = [signal for signal in ctx.signals if signal.kind is SignalKind.ERROR]
@@ -582,6 +701,9 @@ ALL_RULES = (
     rule_filter_wiring,
     rule_dovecot_blind,
     rule_external_alert,
+    rule_disk_pressure,
+    rule_disk_filling,
+    rule_certificate_expiry,
     rule_filter_engine_drift,
     rule_rate_spike,
     rule_counter_reset,

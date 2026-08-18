@@ -12,18 +12,16 @@ claims to do, and this file is the place that says so.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-import yaml
 
 from watchdesk.collect import run_round
 from watchdesk.config import load_config
+from watchdesk.fixtures import open_fixture
 from watchdesk.leakcheck import assert_clean
 from watchdesk.redact import RedactionPolicy, Redactor
 from watchdesk.sources.base import SignalKind
-from watchdesk.sources.shell import RecordedRunner
 
 FIXTURE = Path(__file__).parent / "fixtures" / "2026-08-fail2ban-gap"
 CONFIG = Path(__file__).parent.parent / "config" / "watchdesk.example.yaml"
@@ -31,10 +29,7 @@ CONFIG = Path(__file__).parent.parent / "config" / "watchdesk.example.yaml"
 
 @pytest.fixture(scope="module")
 def replay():
-    meta = yaml.safe_load((FIXTURE / "meta.yaml").read_text(encoding="utf-8"))
-    config = load_config(CONFIG).model_copy(update={"window_minutes": meta["window_minutes"]})
-    now = datetime.fromisoformat(str(meta["as_of"]).replace("Z", "+00:00")).astimezone(timezone.utc)
-    runner = RecordedRunner(FIXTURE, allowlist=config.shell.to_allowlist())
+    runner, now, config = open_fixture(FIXTURE, load_config(CONFIG))
     return run_round(config, runner=runner, now=now), config
 
 
