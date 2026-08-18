@@ -55,6 +55,52 @@ jobs:
       - run: pipx install ruff
       - run: ruff check .
 
+  # The one test that cannot be faked with a file on disk: a real Docker
+  # daemon, the real json-file driver, the real CLI, the real `docker exec`
+  # path. Every seam between watchdesk and Docker has produced a bug at some
+  # point, and none of them are reachable by reading a log off disk.
+  fake-stack:
+    name: round against a real docker daemon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Start the replay containers
+        run: docker compose -f tests/fake-stack/compose.yml up -d
+      - name: Give them a moment to emit
+        run: sleep 5
+      - name: Collect a round
+        run: |
+          watchdesk --config tests/fake-stack/watchdesk.yaml once \
+            --json --no-state > round.json
+      - name: The incident's shape must come through the real pipeline
+        run: |
+          python - <<'PY'
+          import json, sys
+          signals = {s["key"]: s["value"] for s in json.load(open("round.json"))["signals"]}
+          expected = {
+              "postfix.auth_failures{container=watchdesk-fake-postfix}": 212,
+              "postfix.auth_failures_by_service"
+              "{container=watchdesk-fake-postfix,service=submission/smtpd}": 210,
+              "postfix.auth_failures_by_service"
+              "{container=watchdesk-fake-postfix,service=smtpd}": 2,
+          }
+          for key, want in expected.items():
+              got = signals.get(key)
+              if got != want:
+                  sys.exit(f"{key}: expected {want}, got {got}")
+          errors = [s for s in json.load(open("round.json"))["signals"] if s["kind"] == "error"]
+          if errors:
+              sys.exit(f"collection errors: {errors}")
+          print(f"ok: {len(signals)} signals, no collection errors")
+          PY
+      - name: Stop the replay containers
+        if: always()
+        run: docker compose -f tests/fake-stack/compose.yml down
+
   # A committed fixture that still contains a real address would be a leak
   # that no runtime check can undo, so the tree itself is scanned as well.
   fixtures-are-clean:

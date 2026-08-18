@@ -13,6 +13,9 @@
 /raw/
 tests/fixtures/**/raw/
 
+# The fake stack writes its history next to its config.
+tests/fake-stack/.fake-stack-state.sqlite3
+
 # --- runtime state ---
 # Anchored to the repository root with a leading slash. Unanchored, "var/"
 # matches at any depth — which silently swallowed

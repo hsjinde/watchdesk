@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stand-in for Postfix's mailq, so the fake stack exercises the real
+# `docker exec` path rather than skipping it.
+echo "Mail queue is empty"

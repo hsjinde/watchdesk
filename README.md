@@ -7,14 +7,13 @@ changed.
 
 It is not a dashboard. Dashboards were the problem.
 
-> **Status: staged build, stage 3 of 5 complete.**
-> Collection, change detection and the evidence-bound brief work end to end.
-> `watchdesk replay` reproduces the August incident and its resolution from two
-> real captures, names the config edit that explains the change, and produces a
-> triage summary in which every sentence that survives can name the measurement
-> it rests on. The Discord sink and systemd units land in stage 4; the map
-> below marks what exists today. Nothing in this README describes behaviour
-> that is not in the tree.
+> **Status: staged build, stage 4 of 5 complete — deployable.**
+> Collection, change detection, the evidence-bound brief, the Discord sink and
+> the systemd units all exist and have been run. `watchdesk replay` reproduces
+> the August incident and its resolution from two real captures; a round
+> against a real Docker daemon works via `tests/fake-stack/`. The Alertmanager
+> adapter is stage 5. The map below marks what exists today, and nothing in
+> this README describes behaviour that is not in the tree.
 
 ## Why it exists
 
@@ -128,8 +127,8 @@ src/watchdesk/
     postfix.py        SASL failure rate, queue depth, sent rate [stage 1] DONE
     dovecot.py        login activity + log_path/auth_verbose    [stage 1] DONE
     docker_state.py   health, restart counts, OOM kills         [stage 2] DONE
-    tls_cert.py       days to certificate expiry                [stage 4]
-    disk.py           disk and inode headroom                   [stage 4]
+    tls_cert.py       days to certificate expiry                [stage 5]
+    disk.py           disk and inode headroom                   [stage 5]
     alertmanager.py   webhook payload -> Signal adapter         [stage 5]
   detect/
     state.py          SQLite snapshot history                   [stage 2] DONE
@@ -139,7 +138,7 @@ src/watchdesk/
   leakcheck.py        independent exit check; runtime + CI      [stage 3] DONE
   llm.py              OpenAI-compatible client                  [stage 3] DONE
   brief.py            triage summary with evidence binding      [stage 3] DONE
-  sinks/              discord, stdout                           [stage 4]
+  sinks/              discord, stdout, repeat suppression       [stage 4] DONE
 ```
 
 The collection logic is lifted from `audit.sh`, a read-only scan script I
@@ -466,6 +465,28 @@ project's LLM layer runs against recorded completions, so the assertions are
 about watchdesk's verification rather than about any model's behaviour on the
 day.
 
+### Against a real Docker daemon
+
+```bash
+docker compose -f tests/fake-stack/compose.yml up -d
+watchdesk --config tests/fake-stack/watchdesk.yaml once --sink stdout
+docker compose -f tests/fake-stack/compose.yml down
+```
+
+Two busybox containers replay the redacted 2026-07-31 capture through the real
+log driver, so a round reads it back through the real CLI:
+
+```
+postfix.auth_failures{container=watchdesk-fake-postfix}                              212
+postfix.auth_failures_by_service{...,service=submission/smtpd}                       210
+postfix.auth_failures_by_service{...,service=smtpd}                                    2
+```
+
+Reading those lines off disk instead would test almost nothing that has ever
+broken — every bug found in this project's collection layer was in the seam
+between watchdesk and Docker. CI runs this job on every push; see
+`tests/fake-stack/README.md`.
+
 ### Against a real endpoint
 
 ```bash
@@ -494,6 +515,95 @@ matters most for a tool whose silence is supposed to mean something.
 
 `watchdesk doctor` prints the full command allowlist and the state of the
 history database.
+
+## Deploying it
+
+```bash
+sudo install -d -m 0755 /opt/watchdesk /etc/watchdesk
+sudo install -d -m 0700 /var/lib/watchdesk
+sudo git clone https://github.com/hsjinde/watchdesk /opt/watchdesk/src
+sudo python3 -m venv /opt/watchdesk/.venv
+sudo /opt/watchdesk/.venv/bin/pip install /opt/watchdesk/src
+
+sudo cp /opt/watchdesk/src/config/watchdesk.example.yaml /etc/watchdesk/watchdesk.yaml
+sudo cp /opt/watchdesk/src/.env.example /etc/watchdesk/watchdesk.env
+sudo chmod 0600 /etc/watchdesk/watchdesk.env   # salt, LLM key, webhook
+
+sudo cp /opt/watchdesk/src/deploy/watchdesk.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now watchdesk.timer
+
+watchdesk --config /etc/watchdesk/watchdesk.yaml doctor        # what it may run
+sudo systemctl start watchdesk.service                          # one round now
+journalctl -u watchdesk.service -n 50
+```
+
+A timer rather than a daemon: a oneshot that crashes is retried on the next
+tick and leaves a journal entry, while a daemon that wedges goes quiet and
+looks exactly like a healthy system with nothing to report — which is the
+failure mode this whole project is about.
+
+### It runs as root, and here is why
+
+The unit runs as root. That is not laziness, and the non-root version that
+looks safer mostly is not.
+
+| What it needs | Permissions on a default Ubuntu host |
+| --- | --- |
+| `fail2ban-client` | `/var/run/fail2ban/fail2ban.sock` is `srwx------ root root`. There is no group to join. |
+| the jails' logs | `/var/lib/docker/containers/` is `drwx--x--- root root`, and the `/var/log/*-docker.log` symlinks point straight into it. |
+| the `docker` CLI | `/var/run/docker.sock` is `srw-rw---- root docker`, and membership of `docker` is equivalent to root — a member can start a container with `/` mounted. |
+
+So the "unprivileged" deployment needs ACLs on two root-only paths plus a group
+that is already root-equivalent. `deploy/watchdesk-nonroot.service.example`
+ships it, with the exact commands, because reducing the chance of an *accident*
+is worth something. It does not reduce what the process could do, and claiming
+otherwise would be the same species of "it looks fine" that this project exists
+to argue against.
+
+What the hardening does buy is real and it is smaller: it caps the blast radius
+of a bug. `ProtectSystem=strict` with a single `ReadWritePaths`, and
+`CapabilityBoundingSet=CAP_DAC_READ_SEARCH` — the one capability actually
+needed, to read the container logs. Everything else root would normally carry
+is dropped, including `CAP_NET_ADMIN`. Verified on the host it was written for:
+
+```
+$ systemd-run --property=CapabilityBoundingSet=CAP_DAC_READ_SEARCH ... iptables -L DOCKER-USER
+iptables v1.8.7: Could not fetch rule set generation id: Permission denied (you must be root)
+
+$ iptables -L DOCKER-USER          # same command, no sandbox
+Chain DOCKER-USER (1 references)
+```
+
+A tool sitting next to fail2ban should be the last thing on the box able to
+touch the firewall, and under this unit it cannot — even though it is root.
+
+The same sandbox running a real round: 92 signals, 0 collection errors.
+
+### The Discord sink
+
+```bash
+watchdesk --config /etc/watchdesk/watchdesk.yaml once --sink discord
+```
+
+An on-call channel that reposts an unchanged alert every five minutes gets
+muted within a day, and a muted channel somebody still believes is watching is
+worse than no channel at all. So a brief whose *situation* is unchanged is not
+sent again until `sink.resend_after_minutes` has passed.
+
+"Situation" means which rules fired, at what severity, with which labels — not
+the prose. A rate ticking from 170 to 174 is the same problem and stays quiet;
+a second jail going blind is a new one and goes out immediately. An unchanged
+problem is repeated eventually, because silence forever lets a real problem
+fade out of memory.
+
+Findings below `sink.min_severity` are collected and stored but never pushed. A
+`429` from Discord is obeyed rather than retried — being rate-limited by a chat
+service is not an emergency, and the next round carries the same findings. A
+failed send is not recorded as sent, so the next round tries again.
+
+`replay` can never notify. It accepts `--sink stdout` only, so no rehearsal of
+a past incident can page anybody.
 
 ## Not in scope
 

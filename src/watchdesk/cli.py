@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from .detect.rules import Finding, evaluate
 from .detect.state import StateStore
 from .llm import LLMError, RecordedLLM, build_client
 from .redact import Redactor
+from .sinks import DiscordSink
 from .sources.base import Signal, SignalKind
 from .sources.shell import AllowlistRunner, RecordedRunner
 
@@ -214,6 +216,7 @@ def _cmd_once(args: argparse.Namespace) -> int:
         redactor = None if args.raw else Redactor(config.redaction_policy())
         brief = _build_brief(config, result, findings, args, now, redactor)
         _report(config, result, findings, args, brief)
+        _deliver(config, brief, args, store, now, redactor)
     finally:
         if store is not None:
             store.close()
@@ -254,6 +257,61 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if store is not None:
             store.close()
     return 0
+
+
+def _deliver(
+    config: Config,
+    brief: Brief | None,
+    args: argparse.Namespace,
+    store: StateStore | None,
+    now: datetime,
+    redactor: Redactor | None,
+) -> None:
+    """Push the brief to the configured sink, unless asked not to.
+
+    --dry-run is honoured here and nowhere else: collection and analysis have
+    no side effects to suppress, and the only thing worth being able to switch
+    off is the part that talks to somebody.
+    """
+    if brief is None or args.sink == "stdout" or args.dry_run:
+        return
+    if args.sink != "discord":
+        return
+    sink = DiscordSink(
+        webhook_url=config.env.discord_webhook_url,
+        redactor=redactor or Redactor(config.redaction_policy()),
+        config=config,
+        store=store,
+        now=now,
+    )
+    result = sink.deliver(brief)
+    print(f"discord: {'sent' if result.sent else 'not sent'} — {result.reason}", file=sys.stderr)
+    if result.detail:
+        print(f"         {result.detail}", file=sys.stderr)
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Run rounds on an interval in the foreground.
+
+    The systemd timer in deploy/ is the recommended way to run this — it
+    survives a crash, logs to the journal, and does not hold a process open
+    between rounds. This exists for running it by hand and watching it work.
+    """
+    config = load_config(args.config)
+    interval = (args.interval or config.interval_minutes) * 60
+    print(f"watchdesk serve: every {interval // 60} minute(s), Ctrl-C to stop", file=sys.stderr)
+    while True:
+        started = time.monotonic()
+        try:
+            _cmd_once(args)
+        except KeyboardInterrupt:
+            return 0
+        except Exception as exc:  # noqa: BLE001 - a bad round must not end the service
+            print(f"round failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        try:
+            time.sleep(max(0.0, interval - (time.monotonic() - started)))
+        except KeyboardInterrupt:
+            return 0
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -337,7 +395,9 @@ def main(argv: list[str] | None = None) -> int:
     once = sub.add_parser("once", help="collect one round and evaluate the rules")
     once.add_argument("--fixture", help="replay a recorded fixture directory instead of this host")
     once.add_argument("--dry-run", action="store_true", help="collect only; never notify")
-    once.add_argument("--sink", default="stdout", choices=["stdout"], help="where to send output")
+    once.add_argument(
+        "--sink", default="stdout", choices=["stdout", "discord"], help="where to send the brief"
+    )
     _add_common(once)
     once.set_defaults(func=_cmd_once)
 
@@ -349,9 +409,19 @@ def main(argv: list[str] | None = None) -> int:
         help="report every round, not only the last",
     )
     replay.add_argument("--dry-run", action="store_true", default=True)
-    replay.add_argument("--sink", default="stdout", choices=["stdout"])
+    replay.add_argument("--sink", default="stdout", choices=["stdout", "discord"])
     _add_common(replay)
     replay.set_defaults(func=_cmd_replay)
+
+    serve = sub.add_parser("serve", help="run rounds on an interval in the foreground")
+    serve.add_argument("--interval", type=int, help="minutes between rounds")
+    serve.add_argument("--fixture")
+    serve.add_argument("--dry-run", action="store_true")
+    serve.add_argument(
+        "--sink", default="stdout", choices=["stdout", "discord"], help="where to send the brief"
+    )
+    _add_common(serve)
+    serve.set_defaults(func=_cmd_serve)
 
     doctor = sub.add_parser("doctor", help="show what watchdesk is allowed to do")
     doctor.add_argument("--live", action="store_true", help="also probe live endpoints")

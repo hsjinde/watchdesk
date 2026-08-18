@@ -185,6 +185,23 @@ class RulesConfig(BaseModel):
     )
 
 
+class SinkConfig(BaseModel):
+    """Where a brief goes, and how often the same one may go there twice."""
+
+    #: An on-call tool that reposts an unchanged alert every five minutes gets
+    #: muted within a day, and then it is worse than nothing — it is a muted
+    #: channel somebody believes is watching. So a brief whose findings are
+    #: identical to the last one sent is suppressed until this much time has
+    #: passed.
+    resend_after_minutes: int = 720
+
+    #: Findings below this are collected and stored but not pushed anywhere.
+    min_severity: str = "warning"
+
+    #: Discord rejects messages over 2000 characters outright.
+    max_message_chars: int = 1900
+
+
 class LLMConfig(BaseModel):
     """When to call a language model, and how much rope to give it."""
 
@@ -239,6 +256,18 @@ class Config(BaseModel):
     shell: ShellConfig = Field(default_factory=ShellConfig)
     rules: RulesConfig = Field(default_factory=RulesConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    sink: SinkConfig = Field(default_factory=SinkConfig)
+
+    #: Which sources run. Named explicitly so a deployment without fail2ban,
+    #: or a test running only against containers, does not have to pretend the
+    #: missing pieces are healthy.
+    sources: list[str] = Field(
+        default_factory=lambda: ["fail2ban", "postfix", "dovecot", "docker_state"]
+    )
+
+    #: How long `watchdesk serve` waits between rounds. The systemd timer is
+    #: the recommended path; this exists for running it in the foreground.
+    interval_minutes: int = 5
     redaction: RedactionConfig = Field(default_factory=RedactionConfig)
 
     #: How far back a round looks. Rates are computed over this window, and

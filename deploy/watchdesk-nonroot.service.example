@@ -1,0 +1,69 @@
+# The non-root variant, and what it actually costs.
+#
+# Read the comment block in watchdesk.service first. The short version: this
+# does NOT make watchdesk unprivileged, because `docker` group membership is
+# equivalent to root on any host running Docker — a member can start a
+# container with / mounted and write anywhere. What it does buy is that an
+# ordinary bug cannot casually clobber the system, which is worth something,
+# just not what it looks like.
+#
+# Prerequisites, all of which are changes to the host's permissions:
+#
+#   useradd --system --no-create-home --shell /usr/sbin/nologin watchdesk
+#   usermod -aG docker,adm watchdesk
+#
+#   # fail2ban's socket is root-only and has no group. This grants one user
+#   # the ability to query — and, note, also to unban and reload — the jails.
+#   # There is no read-only subset of the fail2ban protocol.
+#   setfacl -m u:watchdesk:rw /var/run/fail2ban/fail2ban.sock
+#
+#   # The container logs. The ACL has to be re-applied when docker recreates
+#   # the directory, so this belongs in a tmpfiles.d rule, not in your shell
+#   # history.
+#   setfacl -m u:watchdesk:rx /var/lib/docker/containers
+#   setfacl -R -m u:watchdesk:r /var/lib/docker/containers
+#
+#   install -d -o watchdesk -g watchdesk -m 0750 /var/lib/watchdesk
+#
+# If you are not willing to grant a service account write access to the
+# fail2ban control socket, do not use this variant — use the root one and be
+# straightforward about it.
+
+[Unit]
+Description=watchdesk — read-only on-call round for the mail server
+After=network-online.target docker.service fail2ban.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=watchdesk
+Group=watchdesk
+SupplementaryGroups=docker adm
+
+EnvironmentFile=/etc/watchdesk/watchdesk.env
+ExecStart=/opt/watchdesk/.venv/bin/watchdesk \
+    --config /etc/watchdesk/watchdesk.yaml \
+    once --sink discord
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/watchdesk
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

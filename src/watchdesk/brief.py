@@ -135,6 +135,31 @@ class Brief:
             "findings": [finding.to_dict() for finding in self.findings],
         }
 
+    def redacted(self, redactor: Any) -> Brief:
+        """Data through the redactor; structure and confidence markers not."""
+        return Brief(
+            generated_at=self.generated_at,
+            headline=redactor.text(self.headline),
+            headline_source=self.headline_source,
+            findings=tuple(finding.redacted(redactor) for finding in self.findings),
+            claims=tuple(
+                Claim(
+                    text=redactor.text(claim.text),
+                    kind=claim.kind,
+                    confidence=claim.confidence,
+                    refs=tuple(redactor.text(ref) for ref in claim.refs),
+                    note=redactor.text(claim.note) if claim.note else None,
+                )
+                for claim in self.claims
+            ),
+            rejected=tuple(
+                RejectedClaim(text=redactor.text(item.text), reason=redactor.text(item.reason))
+                for item in self.rejected
+            ),
+            model=self.model,
+            llm_error=redactor.text(self.llm_error) if self.llm_error else None,
+        )
+
     def render(self) -> str:
         lines = [f"[{str(self.severity).upper()}] {self.headline}"]
         if self.headline_source != "llm":

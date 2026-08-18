@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stand-in for postconf. Answers the one question watchdesk asks.
+case "$1" in
+  smtpd_sasl_type) echo "smtpd_sasl_type = dovecot" ;;
+  -n)              echo "smtpd_sasl_type = dovecot" ;;
+  *)               echo "$1 = " ;;
+esac

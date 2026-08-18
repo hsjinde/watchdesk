@@ -1,0 +1,98 @@
+# watchdesk — one collection round.
+#
+# Driven by watchdesk.timer; this unit is Type=oneshot and exits.
+#
+# ---------------------------------------------------------------------------
+# ABOUT RUNNING THIS AS ROOT
+#
+# It runs as root, and the honest reason is that on a default Ubuntu host it
+# cannot do its job otherwise:
+#
+#   /var/run/fail2ban/fail2ban.sock   srwx------  root root
+#       Connecting requires write permission on the socket. There is no group
+#       to join. fail2ban-client is root-only, full stop.
+#
+#   /var/lib/docker/containers/       drwx--x---  root root
+#       The json-file logs the jails actually read. Not readable by anyone
+#       else, and the /var/log/*-docker.log symlinks point straight into it,
+#       so they do not help.
+#
+#   /var/run/docker.sock             srw-rw----  root docker
+#       The docker CLI needs this. Membership of the `docker` group grants it
+#       — and that membership is equivalent to root, because docker can start
+#       a container with the host filesystem mounted.
+#
+# So the non-root deployment that looks safer (see watchdesk-nonroot.service
+# .example) needs ACLs on two root-only paths plus a group that is already
+# root-equivalent. It reduces the chance of an accident. It does not reduce
+# what the process could do if it were malicious, and saying otherwise would
+# be exactly the kind of "it looks fine" claim this project exists to argue
+# against.
+#
+# What the settings below do buy is real: they cap the blast radius of a bug.
+# The filesystem is read-only apart from one state directory, capabilities are
+# stripped to the single one actually needed, and the syscall surface is
+# narrowed. That is a smaller claim than "runs unprivileged", and it is true.
+# ---------------------------------------------------------------------------
+
+[Unit]
+Description=watchdesk — read-only on-call round for the mail server
+Documentation=https://github.com/hsjinde/watchdesk
+After=network-online.target docker.service fail2ban.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+
+# Secrets: the redaction salt, the LLM key, the Discord webhook.
+# Mode 0600, and never in the repository.
+EnvironmentFile=/etc/watchdesk/watchdesk.env
+
+ExecStart=/opt/watchdesk/.venv/bin/watchdesk \
+    --config /etc/watchdesk/watchdesk.yaml \
+    once --sink discord
+
+# --- blast radius -----------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+# The only thing watchdesk writes: its snapshot history and the salt.
+ReadWritePaths=/var/lib/watchdesk
+
+# CAP_DAC_READ_SEARCH is what lets it read the docker json logs. Every other
+# capability root would normally carry is dropped — including CAP_NET_ADMIN,
+# so even a compromised round cannot touch iptables, which is the thing a
+# tool sitting next to fail2ban should least be able to do.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+
+# AF_UNIX for the docker and fail2ban sockets; INET for the LLM endpoint and
+# the Discord webhook. Nothing else.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# A round that hangs must not hold the timer open.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

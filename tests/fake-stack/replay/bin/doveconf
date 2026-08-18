@@ -1,0 +1,10 @@
+#!/bin/sh
+# Stand-in for doveconf. Reports the healthy configuration, so a failing
+# dovecot health check in this stack means watchdesk is wrong, not the fake.
+for key in "$@"; do
+  case "$key" in
+    log_path)     echo "log_path = /dev/stderr" ;;
+    auth_verbose) echo "auth_verbose = yes" ;;
+    *)            echo "$key = " ;;
+  esac
+done

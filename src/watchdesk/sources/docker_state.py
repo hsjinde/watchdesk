@@ -28,13 +28,21 @@ class DockerStateSource:
 
     def collect(self, ctx: SourceContext) -> Iterable[Signal]:
         config: Config = ctx.config
-        containers = [
-            config.containers.postfix,
-            config.containers.dovecot,
-            config.containers.opendkim,
-            config.containers.django,
-            config.containers.certbot,
-        ]
+        # Deduplicated, order preserved. Two config entries can legitimately
+        # name the same container, and emitting a key twice in one round makes
+        # the state store's (round, key) primary key silently keep whichever
+        # arrived last.
+        containers = list(
+            dict.fromkeys(
+                [
+                    config.containers.postfix,
+                    config.containers.dovecot,
+                    config.containers.opendkim,
+                    config.containers.django,
+                    config.containers.certbot,
+                ]
+            )
+        )
         for container in containers:
             yield from self._one(ctx, container)
 

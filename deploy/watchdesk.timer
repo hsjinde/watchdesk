@@ -1,0 +1,28 @@
+# Runs a round every five minutes.
+#
+# A timer rather than a long-lived daemon: a oneshot that crashes is retried
+# on the next tick and leaves a journal entry, while a daemon that wedges goes
+# quiet and looks exactly like a healthy system with nothing to report — the
+# failure mode this whole project is about.
+
+[Unit]
+Description=watchdesk round every 5 minutes
+Documentation=https://github.com/hsjinde/watchdesk
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+
+# Spread across the minute so watchdesk is not competing with every other
+# */5 cron job on the box for the same disk.
+RandomizedDelaySec=45
+
+# If the machine was asleep or the timer was disabled, run once on return
+# rather than pretending the gap did not happen.
+Persistent=true
+
+AccuracySec=30s
+Unit=watchdesk.service
+
+[Install]
+WantedBy=timers.target

@@ -25,8 +25,27 @@ from .sources.shell import AllowlistRunner, CommandRunner
 __all__ = ["Round", "default_sources", "run_round"]
 
 
-def default_sources() -> list[SignalSource]:
-    return [Fail2banSource(), PostfixSource(), DovecotSource(), DockerStateSource()]
+ALL_SOURCES: dict[str, type] = {
+    "fail2ban": Fail2banSource,
+    "postfix": PostfixSource,
+    "dovecot": DovecotSource,
+    "docker_state": DockerStateSource,
+}
+
+
+def default_sources(names: Sequence[str] | None = None) -> list[SignalSource]:
+    """Instantiate the configured sources.
+
+    An unknown name raises rather than being skipped: a typo in the config
+    that silently disables a collector would produce a round that looks
+    healthy because nobody looked.
+    """
+    if names is None:
+        return [factory() for factory in ALL_SOURCES.values()]
+    unknown = [name for name in names if name not in ALL_SOURCES]
+    if unknown:
+        raise KeyError(f"unknown source(s) in config: {unknown}; known: {sorted(ALL_SOURCES)}")
+    return [ALL_SOURCES[name]() for name in names]
 
 
 @dataclass
@@ -61,7 +80,7 @@ def run_round(
     ctx = SourceContext(runner=runner, config=config, now=moment)
     result = Round(started_at=moment)
 
-    for source in sources if sources is not None else default_sources():
+    for source in sources if sources is not None else default_sources(config.sources):
         try:
             result.signals.extend(source.collect(ctx))
         except Exception as exc:  # noqa: BLE001 - a source must never kill the round

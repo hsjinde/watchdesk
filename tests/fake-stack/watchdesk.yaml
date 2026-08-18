@@ -1,0 +1,47 @@
+# Configuration for the fake stack (tests/fake-stack/compose.yml).
+#
+# Two differences from a real deployment, both deliberate:
+#
+#   * fail2ban is not in `sources`. The fake containers have no jails, and a
+#     source that cannot see anything must not be left running and reporting
+#     zeros — that is precisely the "looks healthy" failure this project is
+#     about. Naming the sources explicitly makes the absence visible.
+#
+#   * The container allowlist points at the fake containers and at the stub
+#     binaries mounted into them. The `docker exec` path is exercised for
+#     real; only what the commands print is recorded.
+
+containers:
+  postfix: watchdesk-fake-postfix
+  dovecot: watchdesk-fake-dovecot
+  opendkim: watchdesk-fake-postfix
+  django: watchdesk-fake-postfix
+  certbot: watchdesk-fake-dovecot
+
+sources:
+  - postfix
+  - dovecot
+  - docker_state
+
+window_minutes: 60
+state_db: ./.fake-stack-state.sqlite3
+
+llm:
+  enabled: false
+
+shell:
+  timeout_s: 60
+  host:
+    - [docker, inspect, "*"]
+    - [docker, inspect, --format, "{{.LogPath}}", "*"]
+    - [docker, inspect, --format, "{{json .State}}", "*"]
+    - [docker, inspect, --format, "{{.RestartCount}}", "*"]
+    - [docker, logs, "*"]
+  containers:
+    watchdesk-fake-postfix:
+      - [mailq]
+      - [postconf, smtpd_sasl_type]
+    watchdesk-fake-dovecot:
+      - [doveconf, log_path, auth_verbose]
+  read_paths:
+    - /var/lib/docker/containers
