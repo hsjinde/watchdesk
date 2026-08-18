@@ -484,8 +484,23 @@ postfix.auth_failures_by_service{...,service=smtpd}                             
 
 Reading those lines off disk instead would test almost nothing that has ever
 broken — every bug found in this project's collection layer was in the seam
-between watchdesk and Docker. CI runs this job on every push; see
-`tests/fake-stack/README.md`.
+between watchdesk and Docker. CI runs this job on every push, and it earned
+its place immediately: the runner is not root, so it took the `docker logs`
+fallback, which returned plain text where the parser expected json-file lines
+and reported **zero** failures from a busy container. That path had never run
+on the host this was developed on, because there the file is readable.
+
+The fallback now asks for `--timestamps` and marks its output as *not*
+wire-format, and `sources/fail2ban.py` refuses to run the filter cross-check
+against it — `docker logs` hands over the decoded message, not the bytes on
+disk, and every filter here anchors on `^\{"log":"`. Applying them to decoded
+text matches nothing and would report the entire window as uncounted. A
+confident false alarm from the one rule this project exists for is worse than
+saying the check could not run, so `postfix.log_read_mode` reports how the log
+was reached and `fail2ban.jail.cross_check_unavailable` says plainly when the
+important check is unavailable.
+
+See `tests/fake-stack/README.md`.
 
 ### Against a real endpoint
 

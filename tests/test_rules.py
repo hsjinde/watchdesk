@@ -261,3 +261,23 @@ def test_findings_carry_the_evidence_of_the_signals_they_rest_on(config) -> None
     findings = evaluate(config, [signal], None, T1)
     assert findings[0].evidence == (evidence,)
     assert findings[0].signal_keys == ("fail2ban.jail.uncounted_failures{jail=postfix-docker}",)
+
+
+def test_a_skipped_cross_check_is_reported_not_assumed_clean(config) -> None:
+    """When the log can only be read through `docker logs`, the filter
+    cross-check cannot run — and a confident false alarm from the one rule
+    this project exists for is worse than admitting it could not run."""
+    signals = [
+        Signal(
+            name="fail2ban.jail.cross_check_unavailable",
+            kind=SignalKind.ERROR,
+            value=True,
+            source="fail2ban",
+            labels={"jail": "postfix-docker"},
+            observed_at=T1,
+            note="skipped rather than run against the wrong representation",
+        )
+    ]
+    findings = evaluate(config, signals, None, T1)
+    assert [f.rule for f in findings] == ["watchdesk.collection_error"]
+    assert findings[0].severity is Severity.WARNING

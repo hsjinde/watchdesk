@@ -494,8 +494,9 @@ class Fail2banSource:
             # Audit the file the jail itself reads, not a second view of the
             # same events. If those two ever differ, the difference is the bug.
             log_path = status.log_paths[0]
-        lines, problems = dockerlog.load(ctx.runner, spec.container, since=since, path=log_path)
-        for problem in problems:
+        read = dockerlog.load(ctx.runner, spec.container, since=since, path=log_path)
+        lines = read.lines
+        for problem in read.problems:
             yield Signal(
                 name="fail2ban.collection_problem",
                 kind=SignalKind.ERROR,
@@ -505,6 +506,29 @@ class Fail2banSource:
                 observed_at=ctx.now,
             )
         if not lines:
+            return
+
+        if not read.wire_format:
+            # The log came back through `docker logs`, which hands over the
+            # decoded message rather than the bytes on disk. Every filter here
+            # anchors on ^\{"log":" — applying it to decoded text matches
+            # nothing, and the cross-check would report the entire window as
+            # uncounted. A confident false alarm from the one rule this project
+            # exists for is worse than admitting the check could not run.
+            yield Signal(
+                name="fail2ban.jail.cross_check_unavailable",
+                kind=SignalKind.ERROR,
+                value=True,
+                source=self.name,
+                labels=labels,
+                observed_at=ctx.now,
+                note=(
+                    "The container log could not be read from disk, so watchdesk only has the "
+                    "decoded messages, not the bytes fail2ban matches. The filter cross-check — "
+                    "the most important check here — is skipped rather than run against the "
+                    "wrong representation. Grant read access to the json-file log to restore it."
+                ),
+            )
             return
 
         # (A) watchdesk's own count, from the decoded messages.

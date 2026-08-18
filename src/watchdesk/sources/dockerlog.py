@@ -19,7 +19,15 @@ from datetime import datetime, timedelta, timezone
 
 from .shell import CommandDenied, CommandRunner
 
-__all__ = ["LogLine", "load", "container_log_path", "parse_json_line", "since_iso"]
+__all__ = [
+    "LogLine",
+    "LogRead",
+    "load",
+    "container_log_path",
+    "parse_json_line",
+    "parse_timestamped_line",
+    "since_iso",
+]
 
 _TIME_FIELD = re.compile(r'"time":"([^"]+)"')
 
@@ -41,6 +49,12 @@ class LogLine:
     message: str
     timestamp: str
     line_no: int
+
+    #: True when ``raw`` really is the on-disk json-file line. False when the
+    #: log had to be read through ``docker logs``, which hands back the decoded
+    #: message and nothing else — so ``raw`` is a stand-in, and any check that
+    #: depends on the exact bytes fail2ban matches is invalid against it.
+    wire_format: bool = True
 
     @property
     def moment(self) -> datetime | None:
@@ -75,6 +89,40 @@ def parse_json_line(line: str, line_no: int = 0) -> LogLine | None:
     )
 
 
+#: `docker logs --timestamps` prefixes each line with RFC3339Nano.
+_TIMESTAMPED = re.compile(r"^(?P<stamp>\d{4}-\d{2}-\d{2}T[\d:.]+Z)\s?(?P<message>.*)$")
+
+
+def parse_timestamped_line(line: str, line_no: int = 0) -> LogLine | None:
+    """Parse one line of ``docker logs --timestamps`` output."""
+    match = _TIMESTAMPED.match(line)
+    if not match:
+        return None
+    message = match.group("message")
+    return LogLine(
+        raw=message,
+        message=message,
+        timestamp=match.group("stamp"),
+        line_no=line_no,
+        wire_format=False,
+    )
+
+
+@dataclass(frozen=True)
+class LogRead:
+    lines: list[LogLine]
+    problems: list[str]
+
+    @property
+    def wire_format(self) -> bool:
+        """Whether these lines carry the bytes fail2ban actually matches."""
+        return all(line.wire_format for line in self.lines) if self.lines else True
+
+    def __iter__(self):
+        """Kept tuple-like so existing ``lines, problems = load(...)`` works."""
+        return iter((self.lines, self.problems))
+
+
 def container_log_path(runner: CommandRunner, container: str) -> str | None:
     """Ask Docker where the container's json log lives."""
     try:
@@ -102,8 +150,8 @@ def load(
     *,
     since: str | None = None,
     path: str | None = None,
-) -> tuple[list[LogLine], list[str]]:
-    """Return ``(lines, problems)`` for one container's log.
+) -> LogRead:
+    """Return the lines and any problems for one container's log.
 
     ``docker logs --since`` is never used, at any cost in runtime.  On this
     host it has returned a single line for a window containing thousands —
@@ -126,18 +174,46 @@ def load(
         except (CommandDenied, FileNotFoundError, OSError) as exc:
             problems.append(f"could not read {resolved}: {exc}")
 
-    if text is None:
-        try:
-            # Fallback only. Note the absence of --since.
-            result = runner.run(["docker", "logs", container])
-        except (CommandDenied, FileNotFoundError) as exc:
-            problems.append(f"could not read the log of container {container}: {exc}")
-            return [], problems
-        if not result.ok:
-            problems.append(f"docker logs {container} exited {result.returncode}")
-            return [], problems
-        text = result.stdout
+    if text is not None:
+        return LogRead(*_parse_wire(text, since, problems))
 
+    # Fallback: the json-file is unreadable — which is the ordinary case for
+    # anything not running as root. `docker logs` gives back the decoded
+    # message, NOT the bytes on disk, so --timestamps is mandatory (there is
+    # no other timestamp) and the result is marked as not wire-format. Callers
+    # that need the exact bytes must check.
+    #
+    # Note the continued absence of --since. The reason it is not trusted has
+    # nothing to do with which path got us here.
+    try:
+        result = runner.run(["docker", "logs", "--timestamps", container])
+    except (CommandDenied, FileNotFoundError) as exc:
+        problems.append(f"could not read the log of container {container}: {exc}")
+        return LogRead([], problems)
+    if not result.ok:
+        problems.append(f"docker logs {container} exited {result.returncode}")
+        return LogRead([], problems)
+
+    lines: list[LogLine] = []
+    undecodable = 0
+    for index, raw in enumerate(result.stdout.splitlines(), start=1):
+        if not raw.strip():
+            continue
+        parsed = parse_timestamped_line(raw, index)
+        if parsed is None:
+            undecodable += 1
+            continue
+        if since is not None and parsed.timestamp < since:
+            continue
+        lines.append(parsed)
+    if undecodable:
+        problems.append(f"{undecodable} line(s) from docker logs had no parseable timestamp")
+    return LogRead(lines, problems)
+
+
+def _parse_wire(
+    text: str, since: str | None, problems: list[str]
+) -> tuple[list[LogLine], list[str]]:
     lines: list[LogLine] = []
     undecodable = 0
     for index, raw in enumerate(text.splitlines(), start=1):

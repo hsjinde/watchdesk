@@ -37,6 +37,7 @@ shell:
     - [docker, inspect, --format, "{{json .State}}", "*"]
     - [docker, inspect, --format, "{{.RestartCount}}", "*"]
     - [docker, logs, "*"]
+    - [docker, logs, --timestamps, "*"]
   containers:
     watchdesk-fake-postfix:
       - [mailq]

@@ -98,6 +98,7 @@ class ShellConfig(BaseModel):
             ["fail2ban-regex", "*", "*"],
             ["docker", "ps", "--all", "--no-trunc", "--format", "{{json .}}"],
             ["docker", "logs", "*"],
+            ["docker", "logs", "--timestamps", "*"],
             ["docker", "inspect", "*"],
             ["docker", "inspect", "--format", "{{.LogPath}}", "*"],
             ["docker", "inspect", "--format", "{{json .State}}", "*"],

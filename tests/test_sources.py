@@ -201,3 +201,69 @@ def test_broken_and_fixed_postfix_filters_disagree_by_the_listener() -> None:
     )
     assert not any(pattern.search(line) for pattern in broken)
     assert any(pattern.search(line) for pattern in fixed)
+
+
+# --------------------------------------------------------------------------
+# Reading the log when the json-file is unreadable
+# --------------------------------------------------------------------------
+
+
+class FakeRunner:
+    """Denies the file read, answers docker logs. What a non-root process sees."""
+
+    def __init__(self, stdout: str, timestamps: bool = True):
+        self.stdout = stdout
+        self.timestamps = timestamps
+        self.argvs: list[list[str]] = []
+
+    def run(self, argv, container=None):
+        from watchdesk.sources.shell import CommandResult
+
+        self.argvs.append(list(argv))
+        if argv[:2] == ["docker", "inspect"]:
+            return CommandResult(tuple(argv), 0, "/var/lib/docker/containers/x/x-json.log\n", "")
+        if argv[:2] == ["docker", "logs"]:
+            return CommandResult(tuple(argv), 0, self.stdout, "")
+        return CommandResult(tuple(argv), 1, "", "no")
+
+    def read_text(self, path):
+        raise PermissionError(path)
+
+    def read_lines(self, path):
+        raise PermissionError(path)
+
+
+TIMESTAMPED = (
+    "2026-08-18T14:00:00.000000000Z Jul 31 01:00:00 mail postfix/submission/smtpd[2]: "
+    "warning: unknown[192.0.2.2]: SASL LOGIN authentication failed: x\n"
+)
+
+
+def test_docker_logs_fallback_is_asked_for_timestamps() -> None:
+    """Without --timestamps there is no time on those lines at all, and the
+    window filter would silently keep or drop everything."""
+    runner = FakeRunner(TIMESTAMPED)
+    read = dockerlog.load(runner, "postfix")
+    assert ["docker", "logs", "--timestamps", "postfix"] in runner.argvs
+    assert len(read.lines) == 1
+
+
+def test_docker_logs_fallback_still_counts_failures() -> None:
+    """The bug CI caught: the fallback returned plain text, parse_json_line
+    rejected every line, and a busy container reported zero failures with no
+    error anywhere."""
+    read = dockerlog.load(FakeRunner(TIMESTAMPED), "postfix")
+    assert len(list(postfix.iter_auth_failures(read.lines))) == 1
+
+
+def test_the_fallback_declares_itself_not_wire_format() -> None:
+    """`docker logs` hands over the decoded message, not the bytes on disk.
+    Anything that depends on those bytes has to know that."""
+    read = dockerlog.load(FakeRunner(TIMESTAMPED), "postfix")
+    assert read.wire_format is False
+    assert all(line.wire_format is False for line in read.lines)
+
+
+def test_reading_the_json_file_is_wire_format() -> None:
+    lines = as_lines("Jul 31 01:00:00 mail postfix/smtpd[1]: warning: x")
+    assert all(line.wire_format for line in lines)

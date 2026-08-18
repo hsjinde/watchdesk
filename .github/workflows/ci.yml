@@ -80,22 +80,35 @@ jobs:
         run: |
           python - <<'PY'
           import json, sys
-          signals = {s["key"]: s["value"] for s in json.load(open("round.json"))["signals"]}
-          expected = {
-              "postfix.auth_failures{container=watchdesk-fake-postfix}": 212,
-              "postfix.auth_failures_by_service"
-              "{container=watchdesk-fake-postfix,service=submission/smtpd}": 210,
-              "postfix.auth_failures_by_service"
-              "{container=watchdesk-fake-postfix,service=smtpd}": 2,
-          }
-          for key, want in expected.items():
-              got = signals.get(key)
-              if got != want:
-                  sys.exit(f"{key}: expected {want}, got {got}")
-          errors = [s for s in json.load(open("round.json"))["signals"] if s["kind"] == "error"]
+
+          round_ = json.load(open("round.json"))
+          signals = {s["key"]: s["value"] for s in round_["signals"]}
+          ctr = "watchdesk-fake-postfix"
+
+          # How the log was reachable at all. The runner is not root, so this
+          # is normally the `docker logs` fallback — the path a non-root
+          # deployment takes, and the one that had a real bug in it.
+          print("read mode:", signals.get(f"postfix.log_read_mode{{container={ctr}}}"))
+
+          total = signals.get(f"postfix.auth_failures{{container={ctr}}}")
+          sub = signals.get(
+              f"postfix.auth_failures_by_service{{container={ctr},service=submission/smtpd}}"
+          )
+          smtpd = signals.get(f"postfix.auth_failures_by_service{{container={ctr},service=smtpd}}")
+
+          # The containers re-emit the capture on a loop, so the absolute
+          # numbers depend on how many times they have looped. The *shape* does
+          # not: every emission is 212 failures, 210 of them on submission.
+          if not total or total % 212:
+              sys.exit(f"expected a multiple of 212 auth failures, got {total}")
+          loops = total // 212
+          if sub != 210 * loops or smtpd != 2 * loops:
+              sys.exit(f"after {loops} loop(s): submission={sub}, smtpd={smtpd}")
+
+          errors = [s for s in round_["signals"] if s["kind"] == "error"]
           if errors:
-              sys.exit(f"collection errors: {errors}")
-          print(f"ok: {len(signals)} signals, no collection errors")
+              sys.exit(f"collection errors: {[e['key'] for e in errors]}")
+          print(f"ok: {len(signals)} signals, {loops} replay loop(s), no collection errors")
           PY
       - name: Stop the replay containers
         if: always()

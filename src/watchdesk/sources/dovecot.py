@@ -83,8 +83,9 @@ class DovecotSource:
         window_hours = max(config.window_minutes, 1) / 60.0
         since = dockerlog.since_iso(ctx.now, config.window_minutes)
 
-        lines, problems = dockerlog.load(ctx.runner, container, since=since)
-        for problem in problems:
+        read = dockerlog.load(ctx.runner, container, since=since)
+        lines = read.lines
+        for problem in read.problems:
             yield Signal(
                 name="dovecot.collection_problem",
                 kind=SignalKind.ERROR,
@@ -93,6 +94,22 @@ class DovecotSource:
                 labels={"container": container},
                 observed_at=ctx.now,
             )
+
+        yield Signal(
+            name="dovecot.log_read_mode",
+            kind=SignalKind.STATE,
+            value="json-file" if read.wire_format else "docker logs (decoded only)",
+            source=self.name,
+            labels={"container": container},
+            observed_at=ctx.now,
+            note=(
+                None
+                if read.wire_format
+                else "Reading through `docker logs` loses the exact bytes fail2ban matches, "
+                "which disables the filter cross-check. Usually means the process cannot read "
+                "/var/lib/docker/containers."
+            ),
+        )
 
         yield Signal(
             name="dovecot.log_lines",
