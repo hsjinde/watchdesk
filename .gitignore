@@ -1,0 +1,33 @@
+# --- redaction secrets: never commit ---
+# The pseudonymisation salt is what keeps ip:7f3a2c from being trivially
+# reversible. It lives in ~/.config/watchdesk/ or in the environment.
+*.salt
+.env
+.env.*
+!.env.example
+
+# Fixture bake artefacts: the real -> placeholder mapping is the reverse
+# lookup table for anything committed under tests/fixtures/. Keeping it out
+# of the repo is the whole point.
+*.mapping.json
+raw/
+tests/fixtures/**/raw/
+
+# --- runtime state ---
+*.sqlite3
+*.sqlite3-journal
+var/
+state/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

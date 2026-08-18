@@ -1,0 +1,440 @@
+"""Redaction — the last thing that runs before data leaves this machine.
+
+watchdesk is meant to be published as a public repository while it watches a
+real, personal mail server. That only works if there is exactly one place
+where host-identifying data can be turned into something safe to publish, and
+if that place is enforced at every exit rather than remembered by hand.
+
+Two exits are in scope, and both call this module:
+
+  1. before a payload is handed to the LLM   (``llm.py``)
+  2. before a message is pushed to Discord   (``sinks/discord.py``)
+
+A third, offline use is fixture baking: turning a real log slice into a file
+that can be committed to ``tests/fixtures/`` while still parsing exactly like
+the original.  That is the same substitution machinery with a different
+output shape, so it lives here too (see :class:`Style`).
+
+What gets replaced
+------------------
+* IPv4 / IPv6 addresses, including the dashed-quad form that shows up inside
+  reverse-DNS names (``198-51-100-23.dynamic-ip.example.net`` leaks the same
+  four octets as the address does).
+* Email addresses — the operator's own mailboxes and everyone else's.
+* Hostnames and fully-qualified domain names.
+* Absolute filesystem paths, except an explicit allowlist of generic system
+  paths that carry no identity (``/etc/fail2ban/jail.local`` is evidence;
+  ``/home/someone/Maildir`` is not).
+
+On reversibility
+----------------
+Attacker addresses become salted pseudonyms (``ip:7f3a2c``) rather than a flat
+``<ip>`` mask, so that a single report still shows *which* lines share a
+source — that correlation is most of the diagnostic value.  The salt is not in
+this repository.
+
+This is pseudonymisation, not anonymisation.  The IPv4 space is 2^32; anyone
+holding the salt can enumerate it in seconds and invert every ``ip:`` token in
+every report ever published.  The salt is the only thing standing there.
+Treat it as a secret, and do not describe watchdesk's output as irreversible.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import os
+import re
+import secrets
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+__all__ = [
+    "Style",
+    "RedactionPolicy",
+    "Redactor",
+    "RedactionError",
+    "load_salt",
+    "DEFAULT_PATH_ALLOWLIST",
+]
+
+
+class RedactionError(RuntimeError):
+    """Raised when redaction cannot be performed safely (e.g. no salt)."""
+
+
+class Style(str, Enum):
+    """How a redacted value is rendered.
+
+    ``PSEUDONYM`` is the runtime style used at the LLM and Discord exits: the
+    replacement is deliberately *not* shaped like the thing it replaced, so a
+    grep for an address pattern over published output finds nothing.
+
+    ``PLACEHOLDER`` is the fixture-baking style: the replacement keeps the
+    original's shape (an address is replaced by an address from a
+    documentation range) so a baked fixture still exercises the real parsers.
+    """
+
+    PSEUDONYM = "pseudonym"
+    PLACEHOLDER = "placeholder"
+
+
+#: Absolute paths under these prefixes are kept verbatim.  Everything on this
+#: list is a stock location on any Ubuntu box running fail2ban + Docker: it
+#: identifies software, not a person or a host.  Anything not matching is
+#: replaced, so the failure mode of forgetting to extend this list is
+#: over-redaction, never a leak.
+DEFAULT_PATH_ALLOWLIST: tuple[str, ...] = (
+    "/etc/fail2ban",
+    "/etc/dovecot",
+    "/etc/postfix",
+    "/etc/docker",
+    "/etc/systemd",
+    "/var/lib/fail2ban",
+    "/var/lib/docker/containers",
+    "/var/log",
+    "/dev",
+    "/usr",
+    "/proc",
+)
+
+#: Trailing labels that look like a TLD but are file extensions.  Without this
+#: the FQDN rule would eat ``jail.local``, ``fail2ban.log``, ``10-logging.conf``
+#: — all of which are evidence we want to keep readable.
+_NOT_A_TLD = frozenset(
+    """
+    local conf log logs py pyc sh bash yaml yml json toml ini cfg md txt rst
+    service timer socket sock pid db sqlite3 gz bz2 xz zip tar example sample
+    key pem crt cert csr lock tmp bak old new orig dist template html css js
+    """.split()
+)
+
+#: RFC 2606 documentation domains — the output alphabet of PLACEHOLDER style.
+_DOC_DOMAINS = ("example.com", "example.net", "example.org", "example.edu")
+
+_IPV4 = re.compile(r"(?<![\w.\-])\d{1,3}(?:\.\d{1,3}){3}(?![\w.\-])")
+# Dashed quad as it appears inside reverse-DNS names.
+_IPV4_DASHED = re.compile(r"(?<![\w.\-])\d{1,3}(?:-\d{1,3}){3}(?![\w\-])")
+# Deliberately loose: anything colon-separated and hex-ish is a *candidate*,
+# and ipaddress.ip_address() is the actual arbiter.  Cheaper to reason about
+# than a fully correct IPv6 grammar, and it cannot produce a false negative
+# that a stricter regex would have caught.
+# The charset includes "." so that an IPv4-mapped address (::ffff:203.0.113.9)
+# is matched whole; matching only its "::ffff:203" prefix would leave three
+# real octets in the output.
+_IPV6_CANDIDATE = re.compile(r"(?<![\w:.])(?=[0-9A-Fa-f:.]*:)[0-9A-Fa-f:.]{3,45}(?![\w:.])")
+_EMAIL = re.compile(r"(?<![\w.\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}(?![\w.\-])")
+_FQDN = re.compile(
+    r"(?<![\w.\-@])(?:[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,24}(?![\w\-])"
+)
+_ABS_PATH = re.compile(r"(?<![\w.\-@])(?:/[A-Za-z0-9._@+\-]+)+/?")
+_HEX64 = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
+
+# Docker's json-file driver writes < and > as the six-character escapes
+# \u003c / \u003e (Go's encoding/json default).  Those escapes sit flush
+# against the values we redact:
+#
+#     from=\u003cnoauth@mail.example.com\u003e
+#
+# and the "c" of \u003c is a word character, so an email rule with a word-
+# boundary lookbehind starts its match one character early and eats the
+# escape.  The result still hides the address but corrupts the line: it no
+# longer parses as JSON, and the whole reason watchdesk matches both bracket
+# forms (see fail2ban.py) is lost.
+#
+# So the escapes are swapped for private-use sentinels for the duration of a
+# pass, purely so that every boundary assertion sees a non-word character
+# there, and restored byte-for-byte afterwards.
+_JSON_ANGLE = re.compile(r"\\u003([ce])", re.IGNORECASE)
+_SENTINELS = {"c": "\ue000", "e": "\ue001"}
+_UNSENTINEL = {v: f"\\u003{k}" for k, v in _SENTINELS.items()}
+_SENTINEL_RE = re.compile("|".join(_UNSENTINEL))
+
+
+def load_salt(env: dict[str, str] | None = None) -> str:
+    """Return the pseudonymisation salt, creating one on first use.
+
+    Resolution order:
+
+    1. ``WATCHDESK_REDACT_SALT`` in the environment (how the systemd unit
+       supplies it, via ``EnvironmentFile``).
+    2. The file named by ``WATCHDESK_SALT_FILE``, else
+       ``~/.config/watchdesk/redact.salt``.  Created with mode 0600 if absent.
+
+    The salt never appears in the repository — ``.gitignore`` excludes
+    ``*.salt`` and ``.env`` — and rotating it deliberately breaks correlation
+    with every previously published report.
+    """
+    env = os.environ if env is None else env
+
+    inline = (env.get("WATCHDESK_REDACT_SALT") or "").strip()
+    if inline:
+        return inline
+
+    path = Path(env.get("WATCHDESK_SALT_FILE") or Path.home() / ".config/watchdesk/redact.salt")
+    if path.exists():
+        salt = path.read_text(encoding="utf-8").strip()
+        if salt:
+            return salt
+        raise RedactionError(f"salt file {path} is empty; delete it to have one generated")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    salt = secrets.token_hex(32)
+    # Write through a 0600 handle rather than chmod-after-write: the latter
+    # leaves a window where the salt is world-readable on disk.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(salt + "\n")
+    return salt
+
+
+@dataclass(frozen=True)
+class RedactionPolicy:
+    """What counts as "ours" — everything else is treated as a third party."""
+
+    salt: str
+    own_domains: tuple[str, ...] = ()
+    own_mailboxes: tuple[str, ...] = ()
+    own_hostnames: tuple[str, ...] = ()
+    path_allowlist: tuple[str, ...] = DEFAULT_PATH_ALLOWLIST
+
+    def __post_init__(self) -> None:
+        if not self.salt or not self.salt.strip():
+            raise RedactionError("RedactionPolicy requires a non-empty salt")
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> RedactionPolicy:
+        env = os.environ if env is None else env
+
+        def csv(name: str) -> tuple[str, ...]:
+            raw = env.get(name, "")
+            return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+        return cls(
+            salt=load_salt(env),
+            own_domains=csv("WATCHDESK_OWN_DOMAINS"),
+            own_mailboxes=csv("WATCHDESK_OWN_MAILBOXES"),
+            own_hostnames=csv("WATCHDESK_OWN_HOSTNAMES"),
+        )
+
+
+class Redactor:
+    """Applies a :class:`RedactionPolicy` to text or to nested data."""
+
+    def __init__(self, policy: RedactionPolicy, style: Style = Style.PSEUDONYM) -> None:
+        self.policy = policy
+        self.style = style
+        # original -> replacement, for the fixture-baking workflow.  Written to
+        # a file that .gitignore keeps out of the repo; it is a reverse lookup
+        # table for every substitution made.
+        self.mapping: dict[str, str] = {}
+        self._placeholder_seq: dict[str, int] = {}
+
+    # -- token helpers -------------------------------------------------
+
+    def _token(self, kind: str, value: str) -> str:
+        """Stable 6-hex pseudonym for ``value`` within namespace ``kind``.
+
+        HMAC rather than ``hash(salt + value)``: the length-extension property
+        of a plain salted digest is not exploitable here, but HMAC is the
+        primitive that is actually specified for keyed hashing and costs
+        nothing extra.
+        """
+        digest = hmac.new(
+            self.policy.salt.encode("utf-8"),
+            f"{kind}\x00{value.lower()}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return digest[:6]
+
+    def _seq(self, kind: str, value: str) -> int:
+        """First-seen ordinal for ``value``, used by PLACEHOLDER style.
+
+        Sequential rather than hash-derived so that placeholder addresses in a
+        baked fixture are guaranteed collision-free, which a truncated hash
+        cannot promise.
+        """
+        key = f"{kind}\x00{value.lower()}"
+        if key not in self._placeholder_seq:
+            self._placeholder_seq[key] = len(
+                [k for k in self._placeholder_seq if k.startswith(f"{kind}\x00")]
+            )
+        return self._placeholder_seq[key]
+
+    def _record(self, original: str, replacement: str) -> str:
+        self.mapping[original] = replacement
+        return replacement
+
+    # -- public API ----------------------------------------------------
+
+    def text(self, value: str) -> str:
+        """Redact a single string.
+
+        Rule order matters and is not arbitrary:
+
+        * IPv6 before IPv4, because ``::ffff:203.0.113.9`` embeds an IPv4.
+        * addresses before FQDNs, so a reverse-DNS name has its octets removed
+          before the name itself is pseudonymised.
+        * paths last, because a path can contain any of the above.
+        """
+        if not value:
+            return value
+        out = _JSON_ANGLE.sub(lambda m: _SENTINELS[m.group(1).lower()], value)
+        out = _HEX64.sub(self._sub_container_id, out)
+        out = _EMAIL.sub(self._sub_email, out)
+        out = _IPV6_CANDIDATE.sub(self._sub_ipv6, out)
+        out = _IPV4.sub(self._sub_ipv4, out)
+        out = self._sub_own_hostnames(out)
+        # FQDNs before the dashed-quad rule, so that a reverse-DNS name such as
+        # 198-51-100-23.dynamic-ip.example.net is replaced as a single unit.
+        # The other order pseudonymises the octets first and then re-matches the
+        # remainder, producing a nested "ip:host:abc123" mess.
+        out = _FQDN.sub(self._sub_fqdn, out)
+        out = _IPV4_DASHED.sub(self._sub_ipv4_dashed, out)
+        out = _ABS_PATH.sub(self._sub_path, out)
+        return _SENTINEL_RE.sub(lambda m: _UNSENTINEL[m.group(0)], out)
+
+    def value(self, obj: Any) -> Any:
+        """Redact recursively through dicts, lists, tuples and sets.
+
+        Dictionary *keys* are redacted too: per-source counters are routinely
+        keyed by address, and a key is just as public as a value.
+        """
+        if isinstance(obj, str):
+            return self.text(obj)
+        if isinstance(obj, dict):
+            return {self.value(k): self.value(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self.value(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(self.value(v) for v in obj)
+        if isinstance(obj, set):
+            return {self.value(v) for v in obj}
+        return obj
+
+    # -- individual rules ----------------------------------------------
+
+    def _sub_container_id(self, match: re.Match[str]) -> str:
+        cid = match.group(0)
+        if self.style is Style.PLACEHOLDER:
+            # Container IDs are not identifying, but a 64-char hex string in a
+            # fixture is noise; collapse it to something readable and stable.
+            return self._record(cid, f"{self._token('cid', cid)}{'0' * 58}")
+        return self._record(cid, f"cid:{self._token('cid', cid)}")
+
+    def _sub_email(self, match: re.Match[str]) -> str:
+        address = match.group(0)
+        local, _, domain = address.partition("@")
+        ours = (
+            domain.lower() in self.policy.own_domains
+            or local.lower() in self.policy.own_mailboxes
+        )
+        if self.style is Style.PLACEHOLDER:
+            if ours:
+                return self._record(address, "owner@example.com")
+            return self._record(address, f"user{self._token('mbox', address)}@example.net")
+        if ours:
+            return self._record(address, "mbox:own")
+        return self._record(address, f"mbox:{self._token('mbox', address)}")
+
+    def _sub_ipv6(self, match: re.Match[str]) -> str:
+        raw = match.group(0)
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            return raw  # a timestamp, a MAC, a hex blob — not an address
+        return self._replace_address(raw, addr)
+
+    def _sub_ipv4(self, match: re.Match[str]) -> str:
+        raw = match.group(0)
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            return raw
+        return self._replace_address(raw, addr)
+
+    def _sub_ipv4_dashed(self, match: re.Match[str]) -> str:
+        raw = match.group(0)
+        try:
+            addr = ipaddress.ip_address(raw.replace("-", "."))
+        except ValueError:
+            return raw
+        replacement = self._replace_address(raw.replace("-", "."), addr)
+        if self.style is Style.PLACEHOLDER:
+            replacement = replacement.replace(".", "-")
+        return self._record(raw, replacement)
+
+    def _replace_address(self, raw: str, addr: ipaddress._BaseAddress) -> str:
+        if self.style is Style.PLACEHOLDER:
+            if not addr.is_global:
+                # RFC1918 / loopback / link-local identify no one, and keeping
+                # them intact preserves the meaning of a fixture (the Docker
+                # gateway really is 172.19.0.1 on that host, and rules key off
+                # exactly that).
+                return raw
+            return self._record(raw, self._placeholder_address(raw, addr))
+        if addr.is_loopback:
+            return self._record(raw, "ip:loopback")
+        if not addr.is_global:
+            return self._record(raw, f"ip:private-{self._token('ip', raw)}")
+        return self._record(raw, f"ip:{self._token('ip', raw)}")
+
+    def _placeholder_address(self, raw: str, addr: ipaddress._BaseAddress) -> str:
+        """Allocate an address from a documentation range (RFC 5737 / 3849).
+
+        Sequential allocation across three /24s gives 762 usable slots before
+        wrap-around; a single incident log has never come close.
+        """
+        if addr.version == 6:
+            return f"2001:db8::{self._seq('ip6', raw) + 1:x}"
+        index = self._seq("ip4", raw)
+        blocks = ("192.0.2", "198.51.100", "203.0.113")
+        block = blocks[(index // 254) % len(blocks)]
+        return f"{block}.{index % 254 + 1}"
+
+    def _sub_own_hostnames(self, value: str) -> str:
+        """Replace configured hostnames, including their bare first label.
+
+        The FQDN rule below cannot catch ``mail-01`` on its own —
+        syslog prints the short hostname with no dots at all.
+        """
+        out = value
+        for hostname in self.policy.own_hostnames:
+            for form in (hostname, hostname.split(".")[0]):
+                if not form:
+                    continue
+                pattern = re.compile(rf"(?<![\w.\-]){re.escape(form)}(?![\w\-])", re.IGNORECASE)
+                replacement = "mail.example.com" if self.style is Style.PLACEHOLDER else "host:self"
+                if pattern.search(out):
+                    self._record(form, replacement)
+                out = pattern.sub(replacement, out)
+        return out
+
+    def _sub_fqdn(self, match: re.Match[str]) -> str:
+        name = match.group(0)
+        tld = name.rstrip(".").rsplit(".", 1)[-1].lower()
+        if tld in _NOT_A_TLD:
+            return name  # a filename, not a host
+        if name.lower().rstrip(".").endswith(_DOC_DOMAINS):
+            # Already a placeholder: either something this redactor emitted
+            # earlier in the pass, or a documentation domain that identifies
+            # nobody.  Re-redacting it would double-substitute our own output.
+            return name
+        if name.lower().rstrip(".") in self.policy.own_domains:
+            return self._record(
+                name, "example.com" if self.style is Style.PLACEHOLDER else "domain:own"
+            )
+        if self.style is Style.PLACEHOLDER:
+            return self._record(name, f"host{self._token('host', name)}.example.net")
+        return self._record(name, f"host:{self._token('host', name)}")
+
+    def _sub_path(self, match: re.Match[str]) -> str:
+        path = match.group(0)
+        if any(path == p or path.startswith(p + "/") for p in self.policy.path_allowlist):
+            return path
+        if self.style is Style.PLACEHOLDER:
+            return self._record(path, f"/redacted/path{self._token('path', path)}")
+        return self._record(path, f"path:{self._token('path', path)}")

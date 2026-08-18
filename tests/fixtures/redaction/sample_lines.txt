@@ -1,0 +1,24 @@
+# Real log formats, safe values.
+#
+# Every line below is the exact shape watchdesk parses in production, with
+# host-identifying values swapped for documentation ranges (RFC 5737 / 3849 /
+# 2606) plus example.com's own published, globally-routable addresses — those
+# are here on purpose, because a non-global address would never exercise the
+# "attacker pseudonym" branch of the redactor.
+#
+# This file is the *input* to the redaction gate. It is not the incident
+# replay fixture; see tests/fixtures/2026-08-fail2ban-gap/ for that.
+
+{"log":"Aug 01 23:09:11 mail-01 postfix/submission/smtpd[15734]: warning: unknown[93.184.216.34]: SASL LOGIN authentication failed: UGFzc3dvcmQ6, sasl_username=info@example-mail.xyz\n","stream":"stdout","time":"2026-08-01T23:09:11.481317771Z"}
+{"log":"Aug 01 23:10:02 mail-01 postfix/smtpd[15801]: NOQUEUE: reject: RCPT from unknown[198.51.100.23]: 454 4.7.1 \u003cvictim@example.org\u003e: Relay access denied; from=\u003cattacker@example.net\u003e to=\u003cvictim@example.org\u003e proto=ESMTP helo=\u003ctest\u003e\n","stream":"stdout","time":"2026-08-01T23:10:02.114000000Z"}
+{"log":"Aug 01 23:11:44 mail-01 dovecot: pop3-login: Info: Disconnected (auth failed, 3 attempts in 12 secs): user=\u003coperator\u003e, method=PLAIN, rip=203.0.113.42, lip=172.19.0.5, session=\u003cAbCdEf\u003e\n","stream":"stdout","time":"2026-08-01T23:11:44.900000000Z"}
+2026-08-01 23:09:12,004 fail2ban.filter         [1234]: INFO    [postfix-docker] Found 93.184.216.34 - 2026-08-01 23:09:11
+2026-08-01 23:54:30,551 fail2ban.actions        [1234]: NOTICE  [postfix-docker] Ban 2606:2800:220:1:248:1893:25c8:1946
+2026-08-01 23:55:00,010 fail2ban.filter         [1234]: INFO    [dovecot-docker] Found 203.0.113.42 - 2026-08-01 23:54:59
+Aug 01 22:59:00 mail-01 sshd[9001]: Invalid user admin from 93-184-216-34.static.example-isp.net port 51422
+jail.local stanza in use: /etc/fail2ban/jail.local -> filter = dovecot-docker
+maildir on this host: /home/operator/Maildir (32K), also /home/postmaster/Maildir
+docker json log: /var/lib/docker/containers/e23cdfa16a0773919c9719317674069195822b785968138b0f1e741baf9cb35a/e23cdfa16a0773919c9719317674069195822b785968138b0f1e741baf9cb35a-json.log
+dovecot logging: log_path = /dev/stderr, auth_verbose = yes
+mailq: 1 message deferred for operator@example-mail.xyz from 198.51.100.23
+operator mailbox operator@example-mail.xyz and postmaster@example-mail.xyz on host mail-01
