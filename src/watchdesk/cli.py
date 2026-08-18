@@ -314,6 +314,42 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             return 0
 
 
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    """Write one Alertmanager webhook body into the spool.
+
+    This is the whole of watchdesk's inbound path, and it deliberately does not
+    speak HTTP. Point Alertmanager at whatever already terminates TLS on this
+    host and have it pipe the body here; watchdesk stays a thing that reads,
+    not a thing that listens.
+    """
+    from .sources.alertmanager import parse_payload
+
+    config = load_config(args.config)
+    if args.payload == "-":
+        raw = sys.stdin.read()
+    else:
+        raw = Path(args.payload).read_text(encoding="utf-8")
+
+    cap = config.alertmanager.max_payload_bytes
+    if len(raw.encode("utf-8")) > cap:
+        print(f"refused: payload is over the {cap}-byte cap", file=sys.stderr)
+        return 1
+    try:
+        payload = parse_payload(raw)
+    except ValueError as exc:
+        # Rejected at the door rather than spooled and puzzled over later.
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+
+    spool = Path(args.spool or config.alertmanager.spool_dir).expanduser()
+    spool.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    target = spool / f"{stamp}-{payload.receiver or 'alerts'}.json"
+    target.write_text(raw, encoding="utf-8")
+    print(f"spooled {len(payload.alerts)} alert(s) to {target}", file=sys.stderr)
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     allowlist = config.shell.to_allowlist()
@@ -422,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_common(serve)
     serve.set_defaults(func=_cmd_serve)
+
+    ingest = sub.add_parser("ingest", help="spool an Alertmanager webhook body")
+    ingest.add_argument("payload", help="path to a JSON body, or - for stdin")
+    ingest.add_argument("--spool", help="spool directory (default from config)")
+    ingest.set_defaults(func=_cmd_ingest)
 
     doctor = sub.add_parser("doctor", help="show what watchdesk is allowed to do")
     doctor.add_argument("--live", action="store_true", help="also probe live endpoints")

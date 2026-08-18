@@ -51,6 +51,19 @@ fail2ban:
   # that you lose the fourth opinion.
   run_fail2ban_regex: true
 
+# Alertmanager webhooks, for everything watchdesk does not measure itself —
+# node exporter, blackbox probes, certificate expiry. watchdesk does NOT listen
+# on a port: a read-only tool on a mail server has no business opening a socket,
+# and a webhook receiver is an unauthenticated endpoint by default. Something
+# that already terminates HTTP writes payloads into the spool
+# (`watchdesk ingest - < body.json` is enough), and rounds read them.
+#
+# Add "alertmanager" to `sources` above to enable it. It is off by default
+# because a spool directory that does not exist is a normal state, not a fault.
+alertmanager:
+  spool_dir: /var/lib/watchdesk/alertmanager
+  max_payload_bytes: 262144
+
 # When to call a language model. The model is only consulted once the rules
 # have already decided something is worth reporting: it costs money per round,
 # and a summary generated every five minutes about nothing teaches the reader

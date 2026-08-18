@@ -325,6 +325,48 @@ def rule_filter_engine_drift(ctx: RuleContext) -> Iterable[Finding]:
         )
 
 
+#: Alertmanager's severity label, mapped onto watchdesk's. Anything unmapped
+#: becomes a NOTICE rather than being guessed upward — a neighbouring system's
+#: idea of "critical" is not automatically this one's.
+_ALERT_SEVERITY = {
+    "critical": Severity.CRITICAL,
+    "error": Severity.CRITICAL,
+    "page": Severity.CRITICAL,
+    "warning": Severity.WARNING,
+    "warn": Severity.WARNING,
+}
+
+
+def rule_external_alert(ctx: RuleContext) -> Iterable[Finding]:
+    """An alert reported by Alertmanager is firing.
+
+    Note the exact claim: watchdesk observed that *Alertmanager says* something
+    is wrong. It did not observe the thing itself, and the finding says so —
+    otherwise a brief ends up asserting a disk is full on the authority of a
+    label somebody else wrote.
+    """
+    for signal in ctx.by_name.get("alertmanager.alert", []):
+        if str(signal.value).lower() != "firing":
+            continue
+        name = signal.labels.get("alertname", "unnamed")
+        severity = _ALERT_SEVERITY.get(signal.labels.get("severity", "").lower(), Severity.NOTICE)
+        where = signal.labels.get("instance") or signal.labels.get("job") or ""
+        yield Finding(
+            rule="alertmanager.alert_firing",
+            severity=severity,
+            confidence=Confidence.OBSERVED,
+            title=f"Alertmanager: {name} firing" + (f" on {where}" if where else ""),
+            detail=(
+                "Reported by Alertmanager, not measured by watchdesk. The text below is "
+                "free-form and comes from whoever wrote the alerting rule; treat it as a "
+                "pointer to look at that system, not as a measurement made here."
+            ),
+            labels=dict(signal.labels),
+            evidence=tuple(signal.evidence),
+            signal_keys=(signal.key,),
+        )
+
+
 def rule_collection_errors(ctx: RuleContext) -> Iterable[Finding]:
     """A collector that could not see is not a collector that saw nothing."""
     errors = [signal for signal in ctx.signals if signal.kind is SignalKind.ERROR]
@@ -539,6 +581,7 @@ ALL_RULES = (
     rule_uncounted_failures,
     rule_filter_wiring,
     rule_dovecot_blind,
+    rule_external_alert,
     rule_filter_engine_drift,
     rule_rate_spike,
     rule_counter_reset,

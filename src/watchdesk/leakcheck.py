@@ -30,7 +30,12 @@ _IPV4 = re.compile(r"(?<![\w.\-])\d{1,3}(?:\.\d{1,3}){3}(?![\w.\-])")
 _IPV4_DASHED = re.compile(r"(?<![\w.\-])\d{1,3}(?:-\d{1,3}){3}(?![\w\-])")
 _IPV6_CANDIDATE = re.compile(r"(?<![\w:.])(?=[0-9A-Fa-f:.]*:)[0-9A-Fa-f:.]{3,45}(?![\w:.])")
 _EMAIL = re.compile(r"(?<![\w.\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}(?![\w.\-])")
-_ABS_PATH = re.compile(r"(?<![\w.\-@])(?:/[A-Za-z0-9._@+\-]+)+/?")
+# The "/" in the lookbehind excludes the "//host" of a URL. This is not here
+# to match redact.py — the two copies are independent on purpose — but because
+# a doubled slash is a scheme separator, not a filesystem path, and flagging it
+# made guard() reject a correctly redacted brief that merely contained a link.
+# Found by a test, not by reading: the alert adapter carries generatorURLs.
+_ABS_PATH = re.compile(r"(?<![\w.\-@/])(?:/[A-Za-z0-9._@+\-]+)+/?")
 
 
 def _is_address(candidate: str) -> bool:

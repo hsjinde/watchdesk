@@ -158,7 +158,36 @@ _EMAIL = re.compile(r"(?<![\w.\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2
 _FQDN = re.compile(
     r"(?<![\w.\-@])(?:[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,24}(?![\w\-])"
 )
-_ABS_PATH = re.compile(r"(?<![\w.\-@])(?:/[A-Za-z0-9._@+\-]+)+/?")
+#: Matched before the path rule, which otherwise swallows "//host/path" whole
+#: and turns a Prometheus graph link into unreadable noise — losing the one
+#: thing that made it useful as evidence (that it is a link, and to what kind
+#: of system) while still not treating the hostname as a hostname.
+_URL = re.compile(
+    r"\b(?P<scheme>https?|ftp)://(?P<host>[^\s/:?#\"']+)(?P<port>:\d+)?(?P<rest>[^\s\"'<>]*)"
+)
+
+#: The leading "/" in the lookbehind matters: without it, "//host/x" from a URL
+#: is read as the filesystem path "/host", and the URL rule's own output gets
+#: eaten by this one. A doubled slash is never a path worth redacting.
+#: This module's own URL output, recognised so a second pass leaves it alone.
+#: llm.py redacts text that a caller may already have redacted, so every rule
+#: here has to be a no-op on its own output — otherwise the guard at the exit
+#: sees different bytes each time it runs.
+_REDACTED_URL = re.compile(r"^(?:https?|ftp)://host:[0-9a-f]{6}")
+
+#: Same reasoning for the PLACEHOLDER-style path replacement, which unlike the
+#: pseudonym form starts with a slash and would otherwise be re-matched as a
+#: path on every subsequent pass.
+_REDACTED_PATH = re.compile(r"^/redacted/path[0-9a-f]{6}$")
+
+#: This module's own PLACEHOLDER-style email output. Deliberately narrow: an
+#: earlier version skipped every address under a documentation domain, which
+#: also skipped attacker@example.net in a fixture. The *domain* identifies
+#: nobody, but the local part is data — in a real log it is the account
+#: somebody was trying to break into.
+_REDACTED_EMAIL = re.compile(r"^(?:owner@example\.com|user[0-9a-f]{6}@example\.net)$", re.I)
+
+_ABS_PATH = re.compile(r"(?<![\w.\-@/])(?:/[A-Za-z0-9._@+\-]+)+/?")
 _HEX64 = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 
 # Docker's json-file driver writes < and > as the six-character escapes
@@ -321,6 +350,7 @@ class Redactor:
         out = _EMAIL.sub(self._sub_email, out)
         out = _IPV6_CANDIDATE.sub(self._sub_ipv6, out)
         out = _IPV4.sub(self._sub_ipv4, out)
+        out = _URL.sub(self._sub_url, out)
         out = self._sub_own_hostnames(out)
         # FQDNs before the dashed-quad rule, so that a reverse-DNS name such as
         # 198-51-100-23.dynamic-ip.example.net is replaced as a single unit.
@@ -365,6 +395,13 @@ class Redactor:
         address = match.group(0)
         if (seen := self._seen(address)) is not None:
             return seen
+        if self.style is Style.PLACEHOLDER and _REDACTED_EMAIL.match(address):
+            # Only in baking. In PSEUDONYM style these placeholders must still
+            # be replaced: a baked fixture goes out through the runtime exit at
+            # replay time, and the leak check there does not know an address is
+            # a placeholder — nor should it, since by then it is too late to
+            # tell.
+            return address
         local, _, domain = address.partition("@")
         ours = (
             domain.lower() in self.policy.own_domains
@@ -453,6 +490,39 @@ class Redactor:
                 return candidate
             index += 1
 
+    def _sub_url(self, match: re.Match[str]) -> str:
+        """Keep the shape of a URL, lose its identity.
+
+        The scheme and the fact that there was a path survive, because "an
+        HTTPS link with a path" is what makes a piece of evidence legible. The
+        host and everything after it do not. The replacement is deliberately
+        shaped so no later rule matches it again: the host token has no dots
+        for the FQDN rule, and ``/<path>`` has no path-legal character after
+        the slash.
+        """
+        url = match.group(0)
+        if (seen := self._seen(url)) is not None:
+            return seen
+        if _REDACTED_URL.match(url):
+            return url
+        scheme = match.group("scheme")
+        host = match.group("host")
+        port = match.group("port") or ""
+        rest = match.group("rest") or ""
+
+        if host.lower().endswith(_DOC_DOMAINS):
+            # Already a placeholder; leave the whole thing alone so example
+            # URLs in documentation stay readable.
+            return url
+
+        if self.style is Style.PLACEHOLDER:
+            replacement = f"{scheme}://host{self._token('host', host)}.example.net{port}"
+        else:
+            replacement = f"{scheme}://host:{self._token('host', host)}{port}"
+        if rest and rest != "/":
+            replacement += "/<path>"
+        return self._record(url, replacement)
+
     def _sub_own_hostnames(self, value: str) -> str:
         """Replace configured hostnames, including their bare first label.
 
@@ -533,6 +603,8 @@ class Redactor:
         path = match.group(0)
         if (seen := self._seen(path)) is not None:
             return seen
+        if self.style is Style.PLACEHOLDER and _REDACTED_PATH.match(path):
+            return path
         if any(path == p or path.startswith(p + "/") for p in self.policy.path_allowlist):
             return path
         if self.style is Style.PLACEHOLDER:

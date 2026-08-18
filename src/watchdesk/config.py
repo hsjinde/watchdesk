@@ -186,6 +186,21 @@ class RulesConfig(BaseModel):
     )
 
 
+class AlertmanagerConfig(BaseModel):
+    """Where spooled webhook payloads are read from.
+
+    watchdesk does not listen on a port — see sources/alertmanager.py. Something
+    that already terminates HTTP writes payloads here, and rounds read them.
+    """
+
+    spool_dir: str = "/var/lib/watchdesk/alertmanager"
+
+    #: A webhook body is untrusted input arriving over the network. An
+    #: oversized one is a bug or an attempt, and either way it is refused
+    #: unread rather than parsed to find out.
+    max_payload_bytes: int = 256 * 1024
+
+
 class SinkConfig(BaseModel):
     """Where a brief goes, and how often the same one may go there twice."""
 
@@ -258,10 +273,13 @@ class Config(BaseModel):
     rules: RulesConfig = Field(default_factory=RulesConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     sink: SinkConfig = Field(default_factory=SinkConfig)
+    alertmanager: AlertmanagerConfig = Field(default_factory=AlertmanagerConfig)
 
     #: Which sources run. Named explicitly so a deployment without fail2ban,
     #: or a test running only against containers, does not have to pretend the
-    #: missing pieces are healthy.
+    #: missing pieces are healthy. "alertmanager" is available but off by
+    #: default: a spool directory that does not exist is a normal state, not a
+    #: fault, and enabling a source that reports nothing is how a gap hides.
     sources: list[str] = Field(
         default_factory=lambda: ["fail2ban", "postfix", "dovecot", "docker_state"]
     )

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .config import Config
+from .sources.alertmanager import AlertmanagerSource
 from .sources.base import Signal, SignalKind, SignalSource, SourceContext, utcnow
 from .sources.docker_state import DockerStateSource
 from .sources.dovecot import DovecotSource
@@ -30,6 +31,7 @@ ALL_SOURCES: dict[str, type] = {
     "postfix": PostfixSource,
     "dovecot": DovecotSource,
     "docker_state": DockerStateSource,
+    "alertmanager": AlertmanagerSource,
 }
 
 

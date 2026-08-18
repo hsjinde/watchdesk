@@ -7,13 +7,13 @@ changed.
 
 It is not a dashboard. Dashboards were the problem.
 
-> **Status: staged build, stage 4 of 5 complete — deployable.**
-> Collection, change detection, the evidence-bound brief, the Discord sink and
-> the systemd units all exist and have been run. `watchdesk replay` reproduces
-> the August incident and its resolution from two real captures; a round
-> against a real Docker daemon works via `tests/fake-stack/`. The Alertmanager
-> adapter is stage 5. The map below marks what exists today, and nothing in
-> this README describes behaviour that is not in the tree.
+> **Status: all five stages complete.**
+> Collection, change detection, the evidence-bound brief, the Discord sink, the
+> systemd units and the Alertmanager adapter all exist and have been run.
+> `watchdesk replay` reproduces the August incident and its resolution from two
+> real captures; a round against a real Docker daemon runs in CI via
+> `tests/fake-stack/`. Nothing in this README describes behaviour that is not
+> in the tree.
 
 ## Why it exists
 
@@ -127,9 +127,9 @@ src/watchdesk/
     postfix.py        SASL failure rate, queue depth, sent rate [stage 1] DONE
     dovecot.py        login activity + log_path/auth_verbose    [stage 1] DONE
     docker_state.py   health, restart counts, OOM kills         [stage 2] DONE
-    tls_cert.py       days to certificate expiry                [stage 5]
-    disk.py           disk and inode headroom                   [stage 5]
-    alertmanager.py   webhook payload -> Signal adapter         [stage 5]
+    tls_cert.py       days to certificate expiry                via alertmanager
+    disk.py           disk and inode headroom                   via alertmanager
+    alertmanager.py   webhook payload -> Signal adapter         [stage 5] DONE
   detect/
     state.py          SQLite snapshot history                   [stage 2] DONE
     rules.py          thresholds, rate-of-change, silence       [stage 2] DONE
@@ -620,13 +620,61 @@ failed send is not recorded as sent, so the next round tries again.
 `replay` can never notify. It accepts `--sink stdout` only, so no rehearsal of
 a past incident can page anybody.
 
+## Everything else, through Alertmanager
+
+Certificate expiry, disk headroom, blackbox probes — none of that needs another
+collector here. It needs one adapter, and `sources/alertmanager.py` is it.
+
+```bash
+# whatever already terminates HTTP on this host pipes the body in
+watchdesk ingest - < webhook.json
+# then rounds read the spool
+watchdesk --config /etc/watchdesk/watchdesk.yaml once
+```
+
+```
+[CRITICAL] Alertmanager: HostDiskWillFill firing on ip:private-96d000:9100
+  rule: alertmanager.alert_firing  confidence: observed
+  Reported by Alertmanager, not measured by watchdesk. The text below is
+  free-form and comes from whoever wrote the alerting rule; treat it as a
+  pointer to look at that system, not as a measurement made here.
+  evidence[alert] alertmanager:7b1a2c3d
+    Filesystem / will be full in 4 hours
+```
+
+Three decisions worth naming:
+
+**watchdesk does not listen on a port.** A webhook receiver is an
+unauthenticated HTTP endpoint by default, and a read-only monitoring tool on a
+mail server has no business opening a socket. Payloads are spooled as files by
+something that already terminates HTTP; rounds read the spool. The cost is a
+few seconds of latency.
+
+**An alert is untrusted input, in a way that is easy to miss.** Annotations are
+free text written by whoever configured the alerting rules, and they flow into
+the brief, which flows into an LLM prompt — a prompt-injection path from a
+neighbouring system into the thing that writes your on-call summary. The
+defences are unglamorous: annotations are length-capped, they are carried as
+evidence rather than as instructions, and every claim in a brief still has to
+cite a ref that resolves, so text arriving in an annotation cannot manufacture
+a measurement. Alert labels also routinely carry addresses (`instance` is
+almost always `host:port`), and they go out through the same redaction as
+everything else — nothing is exempt for having come from a system the operator
+trusts.
+
+**The finding says who observed what.** watchdesk observed that *Alertmanager
+says* a disk will fill. It did not observe the disk. An unmapped severity
+becomes a `notice` rather than being guessed upward: a neighbouring system's
+idea of "critical" is not automatically this one's.
+
 ## Not in scope
 
 - **No automated remediation.** No banning, no restarting, no config edits.
   This is a design position, not a phase-one limitation.
 - **No `/var/run/docker.sock`**, mounted or otherwise.
-- **No Prometheus or Grafana.** Alertmanager webhooks can be adapted into
-  `Signal`s later (stage 5); watchdesk is not becoming a metrics stack.
+- **No Prometheus or Grafana.** Alertmanager webhooks are adapted into
+  `Signal`s (above); watchdesk is not becoming a metrics stack.
+- **No listening socket**, for the reasons above.
 
 ## Licence
 
