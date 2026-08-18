@@ -1,0 +1,32 @@
+# Written by scripts/bake_fixture.py. Provenance is part of the fixture:
+# a capture that overstates its own authenticity is worse than a synthetic one.
+name: 2026-08-fail2ban-gap
+as_of: '2026-07-31T23:59:59Z'
+window_minutes: 1440
+captured_from: a single self-hosted mail server, redacted at capture time
+provenance:
+  genuine_redacted:
+  - files/var/log/postfix-docker.log
+  - files/var/log/dovecot-docker.log
+  - files/var/log/fail2ban.log
+  - commands/host_fail2ban_regex_*
+  reconstructed:
+    commands/host_fail2ban_client_status_*: fail2ban keeps Total failed / Total banned in
+      memory only, so the numbers from that evening are not in any file. They are replayed
+      from the Found/Ban events fail2ban logged as they happened, counted from the last restart
+      at 2026-07-20 17:18:53. Currently failed is derived as trailing-24h Found events from
+      addresses not currently banned.
+    files/etc/fail2ban/filter.d/postfix-docker.conf: 'the live file with the 2026-08-01 fix
+      reverted, and only that: the service was matched as postfix/\w+, which cannot match
+      the extra path segment in postfix/submission/smtpd. This is what the file contained
+      on the day captured.'
+  captured_at_bake_time:
+  - commands/exec_postfix_mailq.txt
+  - commands/exec_postfix_postconf_smtpd_sasl_type.txt
+  - commands/exec_dovecot_doveconf_log_path_auth_verbose.txt
+redaction:
+  style: placeholder
+  note: Addresses are substituted for documentation-range addresses (RFC 5737 / 3849) so the
+    lines still parse; private and loopback addresses are left as they were, since they identify
+    nobody and the detection rules key on them. The original-to-placeholder mapping is not
+    in this repository.

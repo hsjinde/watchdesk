@@ -1,0 +1,109 @@
+# watchdesk configuration.
+#
+# This file is meant to be readable and committable. It says what watchdesk
+# watches and — more importantly — exactly what it is allowed to run. An
+# allowlist nobody can read is not a control, so it lives here in full rather
+# than being buried in code.
+#
+# Secrets are NOT here. The redaction salt, the LLM key and the Discord
+# webhook come from the environment (.env, or systemd's EnvironmentFile).
+
+# Container names default to the mail stack's compose service names.
+containers:
+  postfix: postfix
+  dovecot: dovecot
+  opendkim: opendkim
+  django: django
+  certbot: certbot
+
+# How far back each round looks. Rules compare one window against the
+# previous one, so this is the resolution at which "3 an hour became 400 an
+# hour" becomes visible.
+window_minutes: 60
+
+state_db: ~/.local/share/watchdesk/state.sqlite3
+
+fail2ban:
+  jail_local: /etc/fail2ban/jail.local
+  filter_dir: /etc/fail2ban/filter.d
+
+  # expect_filter is not decoration. The [dovecot-docker] stanza on this
+  # server once pointed at `filter = dovecot` — fail2ban's stock filter, which
+  # does not understand Docker's JSON-wrapped lines — while a correct
+  # dovecot-docker.conf sat next to it, unused, for weeks. Stating the
+  # expectation here turns that from something a human has to notice into
+  # something that fails.
+  jails:
+    - name: postfix-docker
+      container: postfix
+      expect_filter: postfix-docker
+      dialect: postfix
+    - name: dovecot-docker
+      container: dovecot
+      expect_filter: dovecot-docker
+      dialect: dovecot
+    - name: sshd
+      dialect: sshd
+
+  # fail2ban-regex is the only independent confirmation fail2ban's own tooling
+  # offers, so it is on by default. It reads the whole log (19 MB here) and
+  # takes tens of seconds; turn it off if a round has to be cheap, and accept
+  # that you lose the fourth opinion.
+  run_fail2ban_regex: true
+
+# Identities that belong to the operator. These are masked as "own" rather
+# than pseudonymised, so a report reads "the operator's mailbox" instead of
+# presenting you as another anonymous third party.
+# Can also be supplied via WATCHDESK_OWN_* in the environment.
+redaction:
+  own_domains: []
+  own_mailboxes: []
+  own_hostnames: []
+
+# ---------------------------------------------------------------------------
+# The command allowlist. Deny by default.
+#
+# Granularity is the (container, argv) pair, not the command name. "allow
+# mailq" says nothing about which container or which arguments; "the postfix
+# container may run exactly `mailq`" is a claim you can check.
+#
+# A bare "*" stands for exactly one argument, may not begin with "-", and
+# cannot span arguments. Nothing here runs through a shell.
+#
+# The `docker exec` prefix is never written in this file — watchdesk
+# assembles it from the container name and the argv below, which is what
+# stops an edit here from adding `-v /:/host` or `-u root`.
+# ---------------------------------------------------------------------------
+shell:
+  timeout_s: 120
+
+  host:
+    - [fail2ban-client, status]
+    - [fail2ban-client, status, "*"]
+    - [fail2ban-client, get, "*", logpath]
+    - [fail2ban-client, get, "*", maxretry]
+    - [fail2ban-client, get, "*", findtime]
+    - [fail2ban-client, get, "*", ignoreip]
+    - [fail2ban-regex, "*", "*"]
+    - [docker, ps, --all, --no-trunc, --format, "{{json .}}"]
+    - [docker, logs, "*"]
+    - [docker, inspect, "*"]
+    - [docker, inspect, --format, "{{.LogPath}}", "*"]
+    - [df, -P, -k]
+    - [df, -P, -i]
+
+  containers:
+    postfix:
+      - [mailq]
+      - [postconf, -n]
+      - [postconf, smtpd_sasl_type]
+    dovecot:
+      - [doveconf, log_path, auth_verbose]
+
+  # Files watchdesk may read. Same principle: deny by default.
+  read_paths:
+    - /etc/fail2ban
+    - /var/log/fail2ban.log
+    - /var/log/postfix-docker.log
+    - /var/log/dovecot-docker.log
+    - /var/lib/docker/containers

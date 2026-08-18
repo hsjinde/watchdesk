@@ -104,6 +104,24 @@ DEFAULT_PATH_ALLOWLIST: tuple[str, ...] = (
 #: Trailing labels that look like a TLD but are file extensions.  Without this
 #: the FQDN rule would eat ``jail.local``, ``fail2ban.log``, ``10-logging.conf``
 #: — all of which are evidence we want to keep readable.
+_KNOWN_TLDS = frozenset(
+    """
+    com net org edu gov mil int info biz name pro mobi asia coop aero jobs tel travel cat post
+    xyz top icu vip club online site shop live cloud app dev ai tech space store one fun link
+    host email press blog wiki world life today zone group company services center media agency
+    digital network systems solutions work win bond cyou sbs rest quest monster lol autos beauty
+    hair skin makeup mom boats homes buzz cc tv ws su me io co
+    tw jp cn hk kr sg my th vn ph id in pk bd lk np
+    us ca mx br ar cl pe ve uy py bo ec
+    uk de fr nl be ch at es it pt se no dk fi is ie pl cz sk hu ro bg gr hr si lt lv ee
+    ru ua by kz md ge am az
+    au nz za ng ke eg ma tn dz gh tz ug zm zw
+    il tr ir sa ae qa kw om jo lb sy iq ye
+    """.split()
+)
+
+#: Labels that look like a TLD but are not.  This list is the *second* guard;
+#: the first is _KNOWN_TLDS above.
 _NOT_A_TLD = frozenset(
     """
     local conf log logs py pyc sh bash yaml yml json toml ini cfg md txt rst
@@ -114,6 +132,15 @@ _NOT_A_TLD = frozenset(
 
 #: RFC 2606 documentation domains — the output alphabet of PLACEHOLDER style.
 _DOC_DOMAINS = ("example.com", "example.net", "example.org", "example.edu")
+
+#: RFC 5737 / RFC 3849 ranges, which stand in for third-party addresses in
+#: baked fixtures.
+_DOC_NETWORKS = (
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    ipaddress.ip_network("2001:db8::/32"),
+)
 
 _IPV4 = re.compile(r"(?<![\w.\-])\d{1,3}(?:\.\d{1,3}){3}(?![\w.\-])")
 # Dashed quad as it appears inside reverse-DNS names.
@@ -367,6 +394,17 @@ class Redactor:
             replacement = replacement.replace(".", "-")
         return self._record(raw, replacement)
 
+    @staticmethod
+    def _is_documentation(addr: ipaddress._BaseAddress) -> bool:
+        """Whether an address is from a documentation range.
+
+        Python reports these as non-global, so without this check a baked
+        fixture's stand-in for an attacker comes back through the runtime
+        redactor labelled ``ip:private-...`` — telling a reader the traffic
+        came from inside the network when it represents the opposite.
+        """
+        return any(addr in network for network in _DOC_NETWORKS)
+
     def _replace_address(self, raw: str, addr: ipaddress._BaseAddress) -> str:
         if self.style is Style.PLACEHOLDER:
             if not addr.is_global:
@@ -378,7 +416,7 @@ class Redactor:
             return self._record(raw, self._placeholder_address(raw, addr))
         if addr.is_loopback:
             return self._record(raw, "ip:loopback")
-        if not addr.is_global:
+        if not addr.is_global and not self._is_documentation(addr):
             return self._record(raw, f"ip:private-{self._token('ip', raw)}")
         return self._record(raw, f"ip:{self._token('ip', raw)}")
 
@@ -400,24 +438,62 @@ class Redactor:
 
         The FQDN rule below cannot catch ``mail-01`` on its own —
         syslog prints the short hostname with no dots at all.
+
+        Two things make this one pass over a single alternation rather than a
+        loop of substitutions, and both are bugs that were observed rather
+        than imagined:
+
+        * A loop re-reads its own output. With ``mail`` configured, the first
+          substitution produced ``mail.example.com`` and the next pass matched
+          the ``mail`` inside it, yielding ``mail.example.com.example.com``.
+        * A bare short name is also the first label of longer names. Without
+          the lookahead below, ``mail`` inside ``mail.example.org`` is
+          replaced on its own, corrupting a domain the FQDN rule was about to
+          handle properly.
         """
-        out = value
+        forms = []
         for hostname in self.policy.own_hostnames:
             for form in (hostname, hostname.split(".")[0]):
-                if not form:
-                    continue
-                pattern = re.compile(rf"(?<![\w.\-]){re.escape(form)}(?![\w\-])", re.IGNORECASE)
-                replacement = "mail.example.com" if self.style is Style.PLACEHOLDER else "host:self"
-                if pattern.search(out):
-                    self._record(form, replacement)
-                out = pattern.sub(replacement, out)
-        return out
+                if form and form not in forms:
+                    forms.append(form)
+        if not forms:
+            return value
+
+        # Longest first, so a configured FQDN wins over its own short form.
+        pattern = re.compile(
+            r"(?<![\w.\-])(?:"
+            + "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+            + r")(?![\w\-]|\.[A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+        replacement = "mail.example.com" if self.style is Style.PLACEHOLDER else "host:self"
+
+        def substitute(match: re.Match[str]) -> str:
+            return self._record(match.group(0), replacement)
+
+        return pattern.sub(substitute, value)
 
     def _sub_fqdn(self, match: re.Match[str]) -> str:
         name = match.group(0)
         tld = name.rstrip(".").rsplit(".", 1)[-1].lower()
         if tld in _NOT_A_TLD:
             return name  # a filename, not a host
+        if tld not in _KNOWN_TLDS:
+            # Dotted identifiers are everywhere in this data and are not hosts:
+            # logger names (fail2ban.filter, fail2ban.actions), module paths
+            # (watchdesk.sources.postfix), setting names. Redacting them
+            # corrupts the evidence — a baked fixture whose logger names became
+            # host9a3f.example.net stops parsing as a fail2ban log at all,
+            # which is how this rule was found.
+            #
+            # The trade-off is deliberate and worth stating: a hostname under a
+            # TLD missing from this list is NOT redacted. What that can expose
+            # is a third party's reverse-DNS name. The operator's own identity
+            # does not depend on this list — own_domains and own_hostnames are
+            # matched explicitly, whatever their TLD — and neither does any
+            # address, which is handled before this rule runs. Extend the list
+            # if these logs start carrying hosts under a newer TLD.
+            return name
         if name.lower().rstrip(".").endswith(_DOC_DOMAINS):
             # Already a placeholder: either something this redactor emitted
             # earlier in the pass, or a documentation domain that identifies

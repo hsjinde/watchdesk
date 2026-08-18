@@ -7,11 +7,12 @@ changed.
 
 It is not a dashboard. Dashboards were the problem.
 
-> **Status: staged build, stage 0 of 5 complete.**
-> Stage 0 is the redaction gate and repository skeleton. The collector,
-> detection, briefing and sink layers land in stages 1–5; the map below marks
-> what exists today. Nothing in this README describes behaviour that is not
-> in the tree.
+> **Status: staged build, stage 1 of 5 complete.**
+> Collection works end to end: `watchdesk once` runs against this host, and
+> `watchdesk replay` reproduces the August incident from a real capture.
+> Change detection, the LLM brief and the Discord sink land in stages 2–4; the
+> map below marks what exists today. Nothing in this README describes
+> behaviour that is not in the tree.
 
 ## Why it exists
 
@@ -120,12 +121,13 @@ src/watchdesk/
   sources/
     base.py           Signal dataclass + SignalSource protocol  [stage 1]
     shell.py          allowlisted read-only command runner      [stage 1]
-    docker_state.py   health, restart counts, OOM kills         [stage 1]
-    fail2ban.py       the core; see below                       [stage 1]
-    postfix.py        SASL failure rate, queue depth, sent rate [stage 1]
-    dovecot.py        login activity + log_path/auth_verbose    [stage 1]
-    tls_cert.py       days to certificate expiry                [stage 1]
-    disk.py           disk and inode headroom                   [stage 1]
+    dockerlog.py      json-file reader; never uses --since      [stage 1] DONE
+    fail2ban.py       the core; see below                       [stage 1] DONE
+    postfix.py        SASL failure rate, queue depth, sent rate [stage 1] DONE
+    dovecot.py        login activity + log_path/auth_verbose    [stage 1] DONE
+    docker_state.py   health, restart counts, OOM kills         [stage 2]
+    tls_cert.py       days to certificate expiry                [stage 2]
+    disk.py           disk and inode headroom                   [stage 2]
     alertmanager.py   webhook payload -> Signal adapter         [stage 5]
   detect/
     state.py          SQLite snapshot history                   [stage 2]
@@ -144,8 +146,37 @@ text for a human to skim.
 
 ### What `fail2ban.py` actually checks
 
-These are transcribed from the incident notes, and the fourth is the reason
-the project exists.
+The jail is never asked how the jail is doing. Every gap this server has had
+was a jail reporting itself healthy, so the module derives three *independent*
+counts over the same window and treats their disagreement as the finding:
+
+| | | |
+| --- | --- | --- |
+| **A** | `observed_failures` | what watchdesk counts in the log, with a matcher deliberately broader than any filter |
+| **B** | `filter_matched_lines` | what the jail's own failregex, read from disk and applied to the raw lines, would match |
+| **C** | `found_events` | what the running fail2ban actually counted, from its own `Found` entries in `fail2ban.log` |
+
+**A > B** means the filter is narrower than reality. On the captured day that
+is 212 versus 2. **B > C** means the filter on disk is not the filter in
+memory — `fail2ban-client reload` has returned OK on this host without taking
+effect, and config review cannot see that, because the config is correct.
+**C > 0 while A = 0** means watchdesk's own matcher has drifted from the log
+format; the detector is not exempt from being wrong, and this is how it says
+so. `fail2ban-regex` is run as a fourth opinion, because it is fail2ban's own
+tooling and therefore the number a sceptic asks for.
+
+Getting C right took two corrections that are worth knowing about, because
+both produced a confident wrong answer first:
+
+- `Found` is emitted by two loggers. `fail2ban.filter` logs one per matched
+  line; `fail2ban.observer` narrates its own ban-time scoring in the same
+  wording. Counting both inflated a healthy jail's tally by 25% and
+  manufactured a permanent disagreement.
+- fail2ban's own timestamp is when it *read* the line, not when the line
+  happened. The trailing `- <date>` on a `Found` entry is the latter, and it
+  is the only one comparable to a count taken from the container log.
+
+The specific checks, transcribed from the incident notes:
 
 - **`docker logs --since` is not trusted.** On this host's Docker version it
   has returned silently truncated output (`--since 7d` returning one line from
@@ -187,6 +218,16 @@ Discord push — and covers:
 | Hostname | `host:self`, `host:7f3a2c` |
 | Absolute path | `path:7f3a2c`, except an allowlist of generic system paths |
 
+One deliberate trade-off in the hostname rule: an FQDN is only pseudonymised
+if its last label is a known TLD. Dotted identifiers are everywhere in this
+data and are not hosts — logger names like `fail2ban.filter`, module paths like
+`watchdesk.sources.postfix` — and redacting them corrupts the evidence badly
+enough that a baked fixture stops parsing as a fail2ban log. The cost is that a
+hostname under a TLD missing from the list is not redacted. What that can
+expose is a third party's reverse-DNS name; the operator's own identity does
+not depend on the list, because `own_domains` and `own_hostnames` are matched
+explicitly whatever their TLD, and no address reaches that rule unredacted.
+
 The path allowlist keeps `/etc/fail2ban/jail.local` and `/var/log/fail2ban.log`
 readable, because those *are* the evidence for the most important rules here,
 and they name software rather than a person. `/home/someone/Maildir` is not on
@@ -204,12 +245,30 @@ the gate decorative.
 `tests/fixtures/redaction/sample_lines.txt` is synthetic: real log formats with
 documentation-range values, written to exercise the redactor.
 
-`tests/fixtures/2026-08-fail2ban-gap/` *(stage 1)* will be a real capture from
-the incident — the container log and `fail2ban.log` from both sides of the gap
-— passed through `redact.py` in its fixture-baking mode before being
-committed. That mode substitutes documentation-range addresses instead of
-`ip:` tokens, so the file still parses as a log while containing no real
-address. The original-to-placeholder mapping is not in this repository.
+`tests/fixtures/2026-08-fail2ban-gap/` is **a real capture from the incident**,
+redacted at capture time by `scripts/bake_fixture.py`. Provenance is recorded
+in its `meta.yaml` and split three ways, because a fixture that overstates its
+own authenticity is worse than a synthetic one:
+
+- **Genuine, redacted.** The Postfix and Dovecot container logs and
+  `fail2ban.log` for 2026-07-31 UTC — 1657, 500 and 919 lines, nothing added
+  or reordered. Also the `fail2ban-regex` output, which is genuine because it
+  was produced by running the real tool against the fixture's own files.
+- **Reconstructed, and labelled as such.** fail2ban keeps `Total failed` and
+  `Total banned` in memory only, so that evening's counters exist in no file —
+  they are replayed from the `Found`/`Ban` events fail2ban logged as they
+  happened, counted from the last restart. The `postfix-docker.conf` in the
+  fixture is the live file with the 2026-08-01 fix reverted and nothing else.
+- **Captured at bake time.** `mailq`, `postconf smtpd_sasl_type` and
+  `doveconf` answers are stable facts about the deployment that cannot be
+  recovered for a past evening. No finding depends on them.
+
+Redaction uses the fixture-baking style, which substitutes documentation-range
+addresses (RFC 5737 / 3849) rather than `ip:` tokens, so every file still
+parses as a log and still exercises the real parsers. Private and loopback
+addresses are left intact — they identify nobody, and the detection rules key
+on the Docker gateway being exactly what it is. The original-to-placeholder
+mapping is not in this repository.
 
 ## Verification
 
@@ -219,16 +278,42 @@ pytest
 
 The redaction gate must be green before anything else is worth running.
 
-Stage 2 onward adds the acceptance test that matters:
+The acceptance test is the one that matters:
 
 ```bash
-watchdesk replay tests/fixtures/2026-08-fail2ban-gap/
+watchdesk --config config/watchdesk.example.yaml replay tests/fixtures/2026-08-fail2ban-gap/
 ```
 
-Fed the logs from the incident, watchdesk has to report that the jails looked
-healthy while authentication failures on the submission port were going
-uncounted. If it cannot produce that finding, the project has not done the one
-thing it claims to do.
+Fed the real logs from the incident, watchdesk reports:
+
+```
+fail2ban.jail.observed_failures{jail=postfix-docker}                       212
+fail2ban.jail.filter_would_match{jail=postfix-docker}                        2
+fail2ban.jail.uncounted_failures{jail=postfix-docker}                      210
+fail2ban.jail.coverage_ratio{jail=postfix-docker}                       0.0094
+fail2ban.jail.uncounted_failures_by_service{...,service=submission/smtpd}  210
+fail2ban.jail.uncounted_failures_by_service{...,service=smtpd}               0
+
+fail2ban.jail.filter_matched_lines{jail=postfix-docker}                      6
+fail2ban.jail.regex_tool_matches{jail=postfix-docker}                        6
+fail2ban.jail.found_events{jail=postfix-docker}                              6
+```
+
+That is the incident: 210 of 212 authentication failures were on the
+submission listener and invisible to the jail, while the jail itself was
+enabled, using the filter it was supposed to use, and had banned an address
+that same day. The three independent counts agreeing at six is what makes the
+212 credible — it rules out "watchdesk's own regex is simply wrong".
+`tests/test_replay_gap.py` asserts every number above.
+
+Against the live host, the same command with no fixture:
+
+```bash
+watchdesk --config config/watchdesk.example.yaml once --window 1440
+```
+
+Output is redacted by default. `--raw` skips redaction for local debugging on
+the machine that owns the data.
 
 ## Not in scope
 

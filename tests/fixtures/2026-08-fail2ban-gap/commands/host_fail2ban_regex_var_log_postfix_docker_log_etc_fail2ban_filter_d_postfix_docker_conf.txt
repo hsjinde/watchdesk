@@ -1,0 +1,30 @@
+
+Running tests
+=============
+
+Use   failregex filter file : postfix-docker, basedir: tests/fixtures/2026-08-fail2ban-gap/files/etc/fail2ban
+Use      datepattern : %b %d %H:%M:%S : MON Day 24hour:Minute:Second
+Use         log file : tests/fixtures/2026-08-fail2ban-gap/files/var/log/postfix-docker.log
+Use         encoding : UTF-8
+
+
+Results
+=======
+
+Failregex: 6 total
+|-  #) [# of hits] regular expression
+|   1) [2] ^\{"log":".*?\bpostfix/\w+\[\d+\]: warning: [^[]*\[<HOST>\](?::\d+)?: SASL [A-Za-z0-9-]+ authentication failed
+|   2) [4] ^\{"log":".*?\bpostfix/\w+\[\d+\]: NOQUEUE: reject: RCPT from [^[]*\[<HOST>\](?::\d+)?: (?:454 4|554 5)\.7\.1 .*Relay access denied
+`-
+
+Ignoreregex: 0 total
+
+Date template hits:
+|- [# of hits] date format
+|  [1657] MON Day 24hour:Minute:Second
+`-
+
+Lines: 1657 lines, 0 ignored, 6 matched, 1651 missed
+[processed in 0.17 sec]
+
+Missed line(s): too many to print.  Use --print-all-missed to print all 1651 lines

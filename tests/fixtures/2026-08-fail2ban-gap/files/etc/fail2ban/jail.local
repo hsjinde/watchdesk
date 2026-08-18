@@ -1,0 +1,44 @@
+[DEFAULT]
+# 預設封鎖 1 天 (86400秒)
+bantime = 86400
+findtime = 600
+maxretry = 5
+
+# 白名單：localhost 與 docker gateway (172.19.0.0/16，nginx 2525/8443 stream proxy 的來源)
+# 避免 fail2ban 誤封自己或 mailnet gateway (2026-07-29 補上，2026-07-20 曾因執行環境權限擋下)
+ignoreip = 127.0.0.1/8 ::1 172.19.0.0/16
+
+# 啟用指數上升封鎖時間 (Ban Time Increment)
+bantime.increment = true
+# 每次重複被封鎖時，時間會以 2 的指數倍率上升 (1x, 2x, 4x, 8x, 16x...)
+bantime.factor = 1
+# 封鎖時間公式 (預設即為指數上升：2^bancount)
+bantime.formula = ban.Time * (1<<(ban.Count if ban.Count<20 else 20)) * banFactor
+# 最大封鎖上限：約 5 週 (300萬秒)，防止誤判被永久封鎖
+bantime.maxtime = 3000000
+
+[sshd]
+enabled = true
+port = ssh
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s
+
+[postfix-docker]
+action = iptables-multiport[name=postfix-docker, port="smtp,ssmtp,submission", protocol="tcp", chain="DOCKER-USER"]
+findtime = 86400
+backend = polling
+enabled = true
+port = smtp,ssmtp,submission
+filter = postfix-docker
+logpath = /var/log/postfix-docker.log
+maxretry = 5
+
+[dovecot-docker]
+action = iptables-multiport[name=dovecot-docker, port="pop3,pop3s,imap,imaps,submission", protocol="tcp", chain="DOCKER-USER"]
+findtime = 86400
+backend = polling
+enabled = true
+port = pop3,pop3s,imap,imaps,submission
+filter = dovecot-docker
+logpath = /var/log/dovecot-docker.log
+maxretry = 5
