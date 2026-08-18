@@ -1,7 +1,7 @@
 # Written by scripts/bake_fixture.py. Provenance is part of the fixture:
 # a capture that overstates its own authenticity is worse than a synthetic one.
-name: 2026-08-fail2ban-gap
-as_of: '2026-07-31T23:59:59Z'
+name: 2026-08-fail2ban-fixed
+as_of: '2026-08-01T23:59:59Z'
 window_minutes: 1440
 captured_from: a single self-hosted mail server, redacted at capture time
 provenance:

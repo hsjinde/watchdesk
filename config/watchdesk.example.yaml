@@ -89,6 +89,8 @@ shell:
     - [docker, logs, "*"]
     - [docker, inspect, "*"]
     - [docker, inspect, --format, "{{.LogPath}}", "*"]
+    - [docker, inspect, --format, "{{json .State}}", "*"]
+    - [docker, inspect, --format, "{{.RestartCount}}", "*"]
     - [df, -P, -k]
     - [df, -P, -i]
 

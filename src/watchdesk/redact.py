@@ -47,6 +47,7 @@ import ipaddress
 import os
 import re
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -251,14 +252,25 @@ class RedactionPolicy:
 class Redactor:
     """Applies a :class:`RedactionPolicy` to text or to nested data."""
 
-    def __init__(self, policy: RedactionPolicy, style: Style = Style.PSEUDONYM) -> None:
+    def __init__(
+        self,
+        policy: RedactionPolicy,
+        style: Style = Style.PSEUDONYM,
+        preset: Mapping[str, str] | None = None,
+    ) -> None:
         self.policy = policy
         self.style = style
         # original -> replacement, for the fixture-baking workflow.  Written to
         # a file that .gitignore keeps out of the repo; it is a reverse lookup
         # table for every substitution made.
-        self.mapping: dict[str, str] = {}
-        self._placeholder_seq: dict[str, int] = {}
+        #
+        # ``preset`` carries that table forward into a later bake. Two fixtures
+        # captured from the same server on adjacent days have to agree on which
+        # placeholder stands for which real address, or every cross-fixture
+        # comparison — the whole point of having two — silently compares
+        # unrelated attackers.
+        self.mapping: dict[str, str] = dict(preset or {})
+        self._used: set[str] = set(self.mapping.values())
 
     # -- token helpers -------------------------------------------------
 
@@ -277,23 +289,18 @@ class Redactor:
         ).hexdigest()
         return digest[:6]
 
-    def _seq(self, kind: str, value: str) -> int:
-        """First-seen ordinal for ``value``, used by PLACEHOLDER style.
-
-        Sequential rather than hash-derived so that placeholder addresses in a
-        baked fixture are guaranteed collision-free, which a truncated hash
-        cannot promise.
-        """
-        key = f"{kind}\x00{value.lower()}"
-        if key not in self._placeholder_seq:
-            self._placeholder_seq[key] = len(
-                [k for k in self._placeholder_seq if k.startswith(f"{kind}\x00")]
-            )
-        return self._placeholder_seq[key]
-
     def _record(self, original: str, replacement: str) -> str:
         self.mapping[original] = replacement
+        self._used.add(replacement)
         return replacement
+
+    def _seen(self, original: str) -> str | None:
+        """Whatever this exact value was replaced with before.
+
+        Consulted first by every rule, so a value keeps one identity for the
+        life of the redactor and across bakes that share a mapping.
+        """
+        return self.mapping.get(original)
 
     # -- public API ----------------------------------------------------
 
@@ -346,6 +353,8 @@ class Redactor:
 
     def _sub_container_id(self, match: re.Match[str]) -> str:
         cid = match.group(0)
+        if (seen := self._seen(cid)) is not None:
+            return seen
         if self.style is Style.PLACEHOLDER:
             # Container IDs are not identifying, but a 64-char hex string in a
             # fixture is noise; collapse it to something readable and stable.
@@ -354,6 +363,8 @@ class Redactor:
 
     def _sub_email(self, match: re.Match[str]) -> str:
         address = match.group(0)
+        if (seen := self._seen(address)) is not None:
+            return seen
         local, _, domain = address.partition("@")
         ours = (
             domain.lower() in self.policy.own_domains
@@ -406,6 +417,8 @@ class Redactor:
         return any(addr in network for network in _DOC_NETWORKS)
 
     def _replace_address(self, raw: str, addr: ipaddress._BaseAddress) -> str:
+        if (seen := self._seen(raw)) is not None:
+            return seen
         if self.style is Style.PLACEHOLDER:
             if not addr.is_global:
                 # RFC1918 / loopback / link-local identify no one, and keeping
@@ -421,17 +434,24 @@ class Redactor:
         return self._record(raw, f"ip:{self._token('ip', raw)}")
 
     def _placeholder_address(self, raw: str, addr: ipaddress._BaseAddress) -> str:
-        """Allocate an address from a documentation range (RFC 5737 / 3849).
+        """Allocate an unused address from a documentation range (RFC 5737 / 3849).
 
-        Sequential allocation across three /24s gives 762 usable slots before
-        wrap-around; a single incident log has never come close.
+        Sequential-with-skip rather than a truncated hash: a fixture in which
+        two attackers collapse onto one address would silently break every
+        per-source rate rule, and a 6-hex hash cannot promise they will not.
+        Skipping values already in ``_used`` is what lets a second bake share
+        the first one's mapping without colliding with it.
         """
-        if addr.version == 6:
-            return f"2001:db8::{self._seq('ip6', raw) + 1:x}"
-        index = self._seq("ip4", raw)
         blocks = ("192.0.2", "198.51.100", "203.0.113")
-        block = blocks[(index // 254) % len(blocks)]
-        return f"{block}.{index % 254 + 1}"
+        index = 0
+        while True:
+            if addr.version == 6:
+                candidate = f"2001:db8::{index + 1:x}"
+            else:
+                candidate = f"{blocks[(index // 254) % len(blocks)]}.{index % 254 + 1}"
+            if candidate not in self._used:
+                return candidate
+            index += 1
 
     def _sub_own_hostnames(self, value: str) -> str:
         """Replace configured hostnames, including their bare first label.
@@ -475,6 +495,8 @@ class Redactor:
 
     def _sub_fqdn(self, match: re.Match[str]) -> str:
         name = match.group(0)
+        if (seen := self._seen(name)) is not None:
+            return seen
         tld = name.rstrip(".").rsplit(".", 1)[-1].lower()
         if tld in _NOT_A_TLD:
             return name  # a filename, not a host
@@ -509,6 +531,8 @@ class Redactor:
 
     def _sub_path(self, match: re.Match[str]) -> str:
         path = match.group(0)
+        if (seen := self._seen(path)) is not None:
+            return seen
         if any(path == p or path.startswith(p + "/") for p in self.policy.path_allowlist):
             return path
         if self.style is Style.PLACEHOLDER:

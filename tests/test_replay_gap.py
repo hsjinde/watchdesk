@@ -158,4 +158,5 @@ def test_signal_names_survive_redaction(replay) -> None:
     redactor = Redactor(RedactionPolicy(salt="replay-test-salt"))
     redacted = [signal.redacted(redactor) for signal in round_.signals]
     assert any(signal.name == "fail2ban.jail.uncounted_failures" for signal in redacted)
-    assert all(signal.name.startswith(("fail2ban.", "postfix.", "dovecot.")) for signal in redacted)
+    prefixes = ("fail2ban.", "postfix.", "dovecot.", "docker.", "watchdesk.")
+    assert all(signal.name.startswith(prefixes) for signal in redacted)

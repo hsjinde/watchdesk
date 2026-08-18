@@ -7,12 +7,13 @@ changed.
 
 It is not a dashboard. Dashboards were the problem.
 
-> **Status: staged build, stage 1 of 5 complete.**
-> Collection works end to end: `watchdesk once` runs against this host, and
-> `watchdesk replay` reproduces the August incident from a real capture.
-> Change detection, the LLM brief and the Discord sink land in stages 2–4; the
-> map below marks what exists today. Nothing in this README describes
-> behaviour that is not in the tree.
+> **Status: staged build, stage 2 of 5 complete.**
+> Collection and change detection work end to end: `watchdesk once` runs
+> against this host, and `watchdesk replay` reproduces the August incident and
+> its resolution from two real captures, naming the config edit that explains
+> the change. The LLM brief and the Discord sink land in stages 3–4; the map
+> below marks what exists today. Nothing in this README describes behaviour
+> that is not in the tree.
 
 ## Why it exists
 
@@ -125,14 +126,14 @@ src/watchdesk/
     fail2ban.py       the core; see below                       [stage 1] DONE
     postfix.py        SASL failure rate, queue depth, sent rate [stage 1] DONE
     dovecot.py        login activity + log_path/auth_verbose    [stage 1] DONE
-    docker_state.py   health, restart counts, OOM kills         [stage 2]
-    tls_cert.py       days to certificate expiry                [stage 2]
-    disk.py           disk and inode headroom                   [stage 2]
+    docker_state.py   health, restart counts, OOM kills         [stage 2] DONE
+    tls_cert.py       days to certificate expiry                [stage 4]
+    disk.py           disk and inode headroom                   [stage 4]
     alertmanager.py   webhook payload -> Signal adapter         [stage 5]
   detect/
-    state.py          SQLite snapshot history                   [stage 2]
-    rules.py          thresholds, rate-of-change, silence       [stage 2]
-  correlate.py        anomaly x recent change                   [stage 2]
+    state.py          SQLite snapshot history                   [stage 2] DONE
+    rules.py          thresholds, rate-of-change, silence       [stage 2] DONE
+  correlate.py        anomaly x recent change                   [stage 2] DONE
   redact.py           IP / hostname / mailbox / path            [stage 0] DONE
   llm.py              OpenAI-compatible client                  [stage 3]
   brief.py            triage summary with evidence binding      [stage 3]
@@ -203,6 +204,49 @@ The specific checks, transcribed from the incident notes:
   jail reading it is blind. `dovecot.py` treats `log_path` and `auth_verbose`
   as health checks, not configuration.
 
+## What the rules actually do
+
+Three shapes, and the ordering is the argument:
+
+**Thresholds** for things that are wrong at any value — a jail that cannot see
+the traffic in the log it is reading, a jail using a filter it was not
+configured to use. These need no history. `fail2ban.uncounted_failures` has no
+threshold on the number of failures at all: two counts of one log disagreeing
+is wrong whether the number is 210 or 1.
+
+**Change** against the previous round. A watched metric must both multiply by
+a factor *and* move by an absolute amount before it is reported — the factor
+alone fires on 1 → 5, which on a quiet server happens constantly, and the delta
+alone fires on 400 → 430, which is not news. A jump *from zero* has no ratio
+and is reported on the delta alone, because on a server that is usually quiet
+it is the most interesting shape there is. A cumulative counter going
+*backwards* is its own rule: fail2ban keeps `Total failed` in memory, so a
+restart zeroes it, and the next round otherwise shows a jail that suddenly
+looks calm.
+
+**Silence.** A signal that used to be reported and no longer is. This rule
+exists because every other rule in the file reads an absent signal as a healthy
+one — which is the exact confusion the whole project is about.
+
+Findings carry the signals they rest on, the evidence under those signals, and
+a confidence marker that is `observed` or `derived`. Rules never produce
+`hypothesis`; that value exists so stage 3 has somewhere to put an LLM's
+explanation without it being mistaken for a measurement.
+
+### Correlation
+
+`correlate.py` puts the changes it can see next to the anomalies in the same
+window: a config file's digest differing from the previous round, fail2ban
+restarting, a container's start time or restart count moving. It does not
+decide causation. "Bans multiplied by 32" is a fact; "bans multiplied by 32 and
+the postfix-docker filter changed in the same window" is something a person can
+act on.
+
+The list of changes it knows about is deliberately short, and every one of them
+is something watchdesk already measures for another reason. Nothing here reads
+shell history or package logs — a short list of changes it is certain about
+beats a long list it has to guess at.
+
 ## Redaction contract
 
 `redact.py` is enforced at two exits — before the LLM call and before the
@@ -263,6 +307,12 @@ own authenticity is worse than a synthetic one:
   `doveconf` answers are stable facts about the deployment that cannot be
   recovered for a past evening. No finding depends on them.
 
+`tests/fixtures/2026-08-fail2ban-fixed/` is the following day, captured the
+same way, with the filter file as it stood after the fix. Both were baked in
+one chain so they share an address mapping — two fixtures from the same server
+have to agree on which placeholder stands for which real address, or every
+cross-fixture comparison silently compares unrelated attackers.
+
 Redaction uses the fixture-baking style, which substitutes documentation-range
 addresses (RFC 5737 / 3849) rather than `ip:` tokens, so every file still
 parses as a log and still exercises the real parsers. Private and loopback
@@ -306,14 +356,56 @@ that same day. The three independent counts agreeing at six is what makes the
 212 credible — it rules out "watchdesk's own regex is simply wrong".
 `tests/test_replay_gap.py` asserts every number above.
 
-Against the live host, the same command with no fixture:
+### Change detection, across two real days
+
+```bash
+watchdesk --config config/watchdesk.example.yaml replay \
+  tests/fixtures/2026-08-fail2ban-gap/ tests/fixtures/2026-08-fail2ban-fixed/
+```
+
+Two captures from adjacent days — the day the jail was blind, and the day the
+filter was corrected — replayed in order through one history:
+
+```
+[CRITICAL] postfix-docker is blind to 210 authentication failures on submission/smtpd
+           (first round; 212 observed, 2 matched, coverage 0.0094)
+
+[WARNING]  fail2ban.jail.ban_events x32.0: 1 -> 32 events
+           correlation: [config_edit] filter.d/postfix-docker.conf changed between rounds
+[WARNING]  fail2ban.jail.found_events x28.3: 6 -> 170 events
+           correlation: [config_edit] filter.d/postfix-docker.conf changed between rounds
+[WARNING]  postfix-docker: on-disk filter and running fail2ban disagree by 61
+           correlation: [config_edit] filter.d/postfix-docker.conf changed between rounds
+```
+
+The third finding is the filter being corrected part-way through the second
+day: the file on disk at the end of it matches more than the running process
+counted during it. That is a genuine disagreement, and it is reported with the
+edit attached so it reads as an explanation rather than a fault.
+
+What is *absent* matters as much. Real authentication failures went 212 → 226
+across those two days — the traffic barely moved; what changed was how much of
+it fail2ban could see — and no rule reports an attack that did not happen.
+`tests/test_replay_change.py` asserts that silence explicitly.
+
+### Against the live host
+
+Same command with no fixture:
 
 ```bash
 watchdesk --config config/watchdesk.example.yaml once --window 1440
 ```
 
 Output is redacted by default. `--raw` skips redaction for local debugging on
-the machine that owns the data.
+the machine that owns the data, `--signals` prints every signal rather than
+only the findings, and `--no-state` skips history so only threshold rules run.
+
+On this server, two consecutive rounds against a currently-healthy host produce
+92 signals, 0 collection errors and **0 findings** — which is the result that
+matters most for a tool whose silence is supposed to mean something.
+
+`watchdesk doctor` prints the full command allowlist and the state of the
+history database.
 
 ## Not in scope
 

@@ -25,6 +25,7 @@ own authenticity is worse than a synthetic one:
 from __future__ import annotations
 
 import argparse
+import configparser
 import gzip
 import json
 import re
@@ -153,6 +154,13 @@ def main() -> int:
         help="last fail2ban restart before the capture; counters reset there",
     )
     parser.add_argument("--salt", default="fixture-bake", help="salt for the placeholder mapping")
+    parser.add_argument(
+        "--mapping-in",
+        help=(
+            "reuse an earlier bake's mapping, so adjacent fixtures agree on which "
+            "placeholder stands for which real value"
+        ),
+    )
     parser.add_argument("--own-domains", default="")
     parser.add_argument("--own-mailboxes", default="")
     parser.add_argument("--own-hostnames", default="")
@@ -176,7 +184,10 @@ def main() -> int:
     # One redactor for the whole bake, so a given address maps to the same
     # placeholder in the container log, the fail2ban log and the command
     # recordings. Correlation across files is most of what a replay tests.
-    redactor = Redactor(policy, Style.PLACEHOLDER)
+    preset = {}
+    if args.mapping_in:
+        preset = json.loads(Path(args.mapping_in).read_text(encoding="utf-8"))
+    redactor = Redactor(policy, Style.PLACEHOLDER, preset=preset)
 
     day = args.day
     until = datetime.strptime(day, "%Y-%m-%d") + timedelta(days=1)
@@ -199,11 +210,28 @@ def main() -> int:
     )
     written.append(f"files/var/log/fail2ban.log ({len(f2b_lines)} lines, genuine capture)")
 
-    for source in (
-        Path("/etc/fail2ban/jail.local"),
-        Path("/etc/fail2ban/filter.d/postfix-docker.conf"),
-        Path("/etc/fail2ban/filter.d/dovecot-docker.conf"),
-    ):
+    # Every filter file jail.local actually references, resolved from the file
+    # rather than listed by hand. Omitting one makes watchdesk report a
+    # missing-filter CRITICAL that is an artefact of the fixture, and a fixture
+    # that manufactures findings is worse than no fixture.
+    jail_local_text = Path("/etc/fail2ban/jail.local").read_text()
+    parser_ = configparser.RawConfigParser(strict=False)
+    parser_.read_string(jail_local_text)
+    referenced = sorted(
+        # A stanza with no explicit "filter =" uses a filter named after the
+        # jail — that is how [sshd] resolves, and a regex over the file misses
+        # it entirely.
+        {
+            parser_.get(section, "filter", fallback=section)
+            for section in parser_.sections()
+        }
+    )
+    sources = [Path("/etc/fail2ban/jail.local")] + [
+        Path(f"/etc/fail2ban/filter.d/{name}.conf") for name in referenced
+    ]
+    for source in sources:
+        if not source.exists():
+            continue
         text = source.read_text()
         if args.revert_postfix_filter and source.name == "postfix-docker.conf":
             # Revert exactly the 2026-08-01 fix, and nothing else: the service
@@ -240,6 +268,35 @@ def main() -> int:
         (["mailq"], "postfix"),
         (["doveconf", "log_path", "auth_verbose"], "dovecot"),
     ]
+    # Container state. Recorded now, but checked against the window below:
+    # these containers last started well before the day being captured and
+    # have never restarted, so the values are the historical ones. The check
+    # is in the code rather than in a comment because the day this stops being
+    # true, the fixture would quietly start asserting a fiction.
+    containers = ["postfix", "dovecot", "opendkim", "django", "certbot"]
+    anachronistic: list[str] = []
+    for container in containers:
+        for template in ("{{json .State}}", "{{.RestartCount}}"):
+            argv = ["docker", "inspect", "--format", template, container]
+            completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+            slug = recording_slug(argv)
+            (out / "commands" / slug).write_text(
+                redactor.text(completed.stdout), encoding="utf-8"
+            )
+        started = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.StartedAt}}", container],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if started and started[:10] > day:
+            anachronistic.append(f"{container} (started {started})")
+    written.append(
+        f"commands/host_docker_inspect_* ({len(containers)} containers, state at bake time"
+        + (f"; NEWER THAN THE WINDOW: {', '.join(anachronistic)}" if anachronistic else
+           "; all started before the captured day, so these are the historical values")
+        + ")"
+    )
     for argv, container in live_captures:
         completed = subprocess.run(
             ["docker", "exec", container, *argv], capture_output=True, text=True, check=False
@@ -308,6 +365,12 @@ def main() -> int:
                 "commands/exec_postfix_mailq.txt",
                 "commands/exec_postfix_postconf_smtpd_sasl_type.txt",
                 "commands/exec_dovecot_doveconf_log_path_auth_verbose.txt",
+                "commands/host_docker_inspect_* (container state; every container"
+                " last started before the captured day and has never restarted,"
+                " so these values are the historical ones)"
+                if not anachronistic
+                else "commands/host_docker_inspect_* (WARNING: container state is"
+                f" newer than the captured window: {', '.join(anachronistic)})",
             ],
         },
         "redaction": {

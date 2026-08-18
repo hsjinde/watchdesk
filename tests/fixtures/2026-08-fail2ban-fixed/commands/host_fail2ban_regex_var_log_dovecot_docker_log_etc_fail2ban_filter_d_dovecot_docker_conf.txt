@@ -1,0 +1,26 @@
+
+Running tests
+=============
+
+Use   failregex filter file : dovecot-docker, basedir: tests/fixtures/2026-08-fail2ban-fixed/files/etc/fail2ban
+Use      datepattern : %b %d %H:%M:%S : MON Day 24hour:Minute:Second
+Use         log file : tests/fixtures/2026-08-fail2ban-fixed/files/var/log/dovecot-docker.log
+Use         encoding : UTF-8
+
+
+Results
+=======
+
+Failregex: 0 total
+
+Ignoreregex: 0 total
+
+Date template hits:
+|- [# of hits] date format
+|  [452] MON Day 24hour:Minute:Second
+`-
+
+Lines: 452 lines, 0 ignored, 0 matched, 452 missed
+[processed in 0.04 sec]
+
+Missed line(s): too many to print.  Use --print-all-missed to print all 452 lines

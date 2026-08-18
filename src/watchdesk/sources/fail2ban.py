@@ -36,6 +36,7 @@ ask for.
 from __future__ import annotations
 
 import configparser
+import hashlib
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -277,6 +278,8 @@ class Fail2banSource:
 
         jail_local = self._read_jail_local(ctx)
         events = self._found_events(ctx)
+        yield from self._config_digests(ctx, jail_local)
+        yield from self._server_starts(ctx)
 
         configured = {spec.name for spec in config.fail2ban.jails}
         for name in sorted(configured | set(running_jails)):
@@ -732,6 +735,81 @@ class Fail2banSource:
         if not result.ok:
             return None
         return parse_jail_status(name, result.stdout)
+
+    def _config_digests(self, ctx: SourceContext, jail_local: str | None) -> Iterable[Signal]:
+        """Fingerprint the files that decide what gets counted.
+
+        Not a security control — anyone who can edit these can edit this — but
+        a change here between two rounds is the single most useful thing to
+        put next to "the numbers moved". It is what lets correlate.py say
+        "coverage recovered, and the filter file changed in the same window"
+        instead of leaving a human to guess.
+
+        A digest rather than the content: it travels to the LLM and to Discord
+        without carrying a config file with it.
+        """
+        config: Config = ctx.config
+        sources: list[tuple[str, str | None]] = [("jail.local", jail_local)]
+        for spec in config.fail2ban.jails:
+            name = spec.expect_filter or spec.name
+            path = str(Path(config.fail2ban.filter_dir) / f"{name}.conf")
+            try:
+                sources.append((f"filter.d/{name}.conf", ctx.runner.read_text(path)))
+            except (CommandDenied, FileNotFoundError, OSError):
+                continue
+
+        for label, text in sources:
+            if text is None:
+                continue
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+            yield Signal(
+                name="fail2ban.config_digest",
+                kind=SignalKind.STATE,
+                value=digest,
+                source=self.name,
+                labels={"file": label},
+                observed_at=ctx.now,
+                note=(
+                    "A change between rounds marks a config edit; correlate.py pairs it "
+                    "with anomalies in the same window."
+                ),
+            )
+
+    def _server_starts(self, ctx: SourceContext) -> Iterable[Signal]:
+        """How many times fail2ban started inside the window.
+
+        A restart resets every jail's in-memory counters to zero, so a low
+        Total failed after one means "we lost the history", not "it is quiet".
+        Reporting the restart is what stops the next reader drawing the
+        comfortable conclusion.
+        """
+        try:
+            text = ctx.runner.read_text("/var/log/fail2ban.log")
+        except (CommandDenied, FileNotFoundError, OSError):
+            return
+        cutoff = ctx.now.replace(tzinfo=None) - timedelta(minutes=ctx.config.window_minutes)
+        starts = 0
+        for line in text.splitlines():
+            if "Starting Fail2ban" not in line:
+                continue
+            try:
+                stamp = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            if stamp >= cutoff:
+                starts += 1
+        yield Signal(
+            name="fail2ban.server_starts",
+            kind=SignalKind.METRIC,
+            value=starts,
+            source=self.name,
+            observed_at=ctx.now,
+            unit="restarts",
+            note=(
+                "fail2ban restarts reset every jail's Total failed to zero. Bans survive in "
+                "sqlite; counters do not."
+            ),
+        )
 
     def _read_jail_local(self, ctx: SourceContext) -> str | None:
         try:

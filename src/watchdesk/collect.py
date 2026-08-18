@@ -16,6 +16,7 @@ from datetime import datetime
 
 from .config import Config
 from .sources.base import Signal, SignalKind, SignalSource, SourceContext, utcnow
+from .sources.docker_state import DockerStateSource
 from .sources.dovecot import DovecotSource
 from .sources.fail2ban import Fail2banSource
 from .sources.postfix import PostfixSource
@@ -25,7 +26,7 @@ __all__ = ["Round", "default_sources", "run_round"]
 
 
 def default_sources() -> list[SignalSource]:
-    return [Fail2banSource(), PostfixSource(), DovecotSource()]
+    return [Fail2banSource(), PostfixSource(), DovecotSource(), DockerStateSource()]
 
 
 @dataclass

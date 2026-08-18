@@ -100,6 +100,8 @@ class ShellConfig(BaseModel):
             ["docker", "logs", "*"],
             ["docker", "inspect", "*"],
             ["docker", "inspect", "--format", "{{.LogPath}}", "*"],
+            ["docker", "inspect", "--format", "{{json .State}}", "*"],
+            ["docker", "inspect", "--format", "{{.RestartCount}}", "*"],
             ["df", "-P", "-k"],
             ["df", "-P", "-i"],
         ]
@@ -130,6 +132,57 @@ class ShellConfig(BaseModel):
             },
             read_paths=tuple(self.read_paths),
         )
+
+
+class RulesConfig(BaseModel):
+    """Thresholds for change detection.
+
+    Deliberately few, and all in one place. A rules engine with a knob per
+    rule becomes a thing nobody can predict the behaviour of, which is the
+    same failure as a dashboard nobody reads.
+    """
+
+    #: A metric must both multiply by this much and move by this much in
+    #: absolute terms. The factor alone fires on 1 -> 5; the delta alone fires
+    #: on 400 -> 430. Attacks do both.
+    spike_factor: float = 4.0
+    spike_min_delta: float = 10.0
+
+    #: How far |filter_matched_lines - found_events| may drift before it is
+    #: worth reporting. Small non-zero values are normal at a window edge.
+    drift_threshold: int = 5
+
+    #: A baseline older than this many windows is reported as stale rather
+    #: than silently differenced against.
+    stale_baseline_factor: float = 3.0
+
+    #: How far back to look for keys that have stopped being reported.
+    silence_lookback_hours: int = 24
+
+    #: Metrics compared against their previous value. An explicit list rather
+    #: than "every metric": watching everything means a spike report on every
+    #: quiet server's log-line count, and an alert nobody reads is worse than
+    #: no alert.
+    spike_watch: list[str] = Field(
+        default_factory=lambda: [
+            "fail2ban.jail.found_events",
+            "fail2ban.jail.ban_events",
+            "fail2ban.jail.observed_failures",
+            "fail2ban.jail.uncounted_failures",
+            "postfix.auth_failures",
+            "postfix.messages_sent",
+            "postfix.queue_depth",
+            "postfix.relay_denied",
+            "dovecot.auth_failures",
+            "dovecot.successful_logins",
+        ]
+    )
+
+    #: Metrics whose spike is an emergency rather than a curiosity. Outbound
+    #: mail from a personal server is the signature of a relay compromise.
+    critical_on_spike: list[str] = Field(
+        default_factory=lambda: ["postfix.messages_sent", "postfix.queue_depth"]
+    )
 
 
 class RedactionConfig(BaseModel):
@@ -165,6 +218,7 @@ class Config(BaseModel):
     containers: Containers = Field(default_factory=Containers)
     fail2ban: Fail2banConfig = Field(default_factory=Fail2banConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
+    rules: RulesConfig = Field(default_factory=RulesConfig)
     redaction: RedactionConfig = Field(default_factory=RedactionConfig)
 
     #: How far back a round looks. Rates are computed over this window, and
