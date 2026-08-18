@@ -19,8 +19,8 @@ import stat
 from pathlib import Path
 
 import pytest
-from leakcheck import assert_clean, find_leaks
 
+from watchdesk.leakcheck import assert_clean, find_leaks
 from watchdesk.redact import (
     RedactionError,
     RedactionPolicy,

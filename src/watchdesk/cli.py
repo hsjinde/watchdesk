@@ -10,11 +10,13 @@ from pathlib import Path
 
 import yaml
 
+from .brief import Brief, build_brief
 from .collect import Round, run_round
 from .config import Config, load_config
 from .correlate import correlate
 from .detect.rules import Finding, evaluate
 from .detect.state import StateStore
+from .llm import LLMError, RecordedLLM, build_client
 from .redact import Redactor
 from .sources.base import Signal, SignalKind
 from .sources.shell import AllowlistRunner, RecordedRunner
@@ -112,11 +114,46 @@ def _open_store(config: Config, args: argparse.Namespace) -> StateStore | None:
     return StateStore(path)
 
 
+def _build_brief(
+    config: Config,
+    result: Round,
+    findings: list[Finding],
+    args: argparse.Namespace,
+    now: datetime,
+    redactor: Redactor | None,
+) -> Brief | None:
+    """Produce the brief, redacting before the model sees anything.
+
+    Findings and signals are redacted *here*, not inside the client, so that
+    what the model is asked about is exactly what a reader would see. The
+    client redacts again and runs the leak check as a backstop; doing it twice
+    is free because the replacements are not shaped like their inputs.
+    """
+    if args.no_brief:
+        return None
+
+    if args.llm_recording:
+        client = RecordedLLM(args.llm_recording)
+    elif args.no_llm:
+        client = None
+    else:
+        client = build_client(config, redactor or Redactor(config.redaction_policy()))
+
+    safe_findings = findings
+    safe_signals = result.signals
+    if redactor is not None:
+        safe_findings = [finding.redacted(redactor) for finding in findings]
+        safe_signals = [signal.redacted(redactor) for signal in result.signals]
+
+    return build_brief(config, safe_findings, safe_signals, now, client=client)
+
+
 def _report(
     config: Config,
     result: Round,
     findings: list[Finding],
     args: argparse.Namespace,
+    brief: Brief | None = None,
 ) -> None:
     # --raw is for local debugging on the host that owns the data. Every path
     # that leaves this machine redacts; this one does not leave.
@@ -127,18 +164,18 @@ def _report(
         findings = [finding.redacted(redactor) for finding in findings]
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "findings": [finding.to_dict() for finding in findings],
-                    "signals": [signal.to_dict() for signal in signals],
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+        payload: dict = {
+            "findings": [finding.to_dict() for finding in findings],
+            "signals": [signal.to_dict() for signal in signals],
+        }
+        if brief is not None:
+            payload["brief"] = brief.to_dict()
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
+    if brief is not None:
+        print(brief.render())
+        print()
     _print_findings(findings)
     if args.signals:
         print()
@@ -174,7 +211,9 @@ def _cmd_once(args: argparse.Namespace) -> int:
     try:
         result = run_round(config, runner=runner, now=now)
         findings = _analyse(config, result, store, now, label)
-        _report(config, result, findings, args)
+        redactor = None if args.raw else Redactor(config.redaction_policy())
+        brief = _build_brief(config, result, findings, args, now, redactor)
+        _report(config, result, findings, args, brief)
     finally:
         if store is not None:
             store.close()
@@ -208,7 +247,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 # one buries the round the reader actually asked about.
                 print(f"   {len(result.signals)} signals recorded as baseline")
                 continue
-            _report(round_config, result, findings, args)
+            redactor = None if args.raw else Redactor(round_config.redaction_policy())
+            brief = _build_brief(round_config, result, findings, args, now, redactor)
+            _report(round_config, result, findings, args, brief)
     finally:
         if store is not None:
             store.close()
@@ -232,8 +273,32 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             print(f"  {store.round_count()} round(s) recorded")
     else:
         print("  not created yet — the first round will create it")
-    if args.live:
-        print("\n--live checks are added in stage 3 (LLM endpoint smoke test).")
+    if not args.live:
+        print("\nRun with --live to smoke-test the LLM endpoint.")
+        return 0
+
+    print("\nLLM endpoint smoke test")
+    env = config.env
+    print(f"  url:   {env.llm_base_url or '(unset)'}")
+    print(f"  model: {env.llm_model or '(unset)'}")
+    print(f"  key:   {'set' if env.llm_api_key else 'NOT SET'}")
+    client = build_client(config, Redactor(config.redaction_policy()))
+    if client is None:
+        print("  result: not configured — set LLM_BASE_URL and LLM_MODEL")
+        return 1
+    try:
+        # Fixed text with nothing from this host in it: a reachability check
+        # should not be the thing that ships a log line somewhere.
+        response = client.complete(
+            "Reply with a JSON object and nothing else.",
+            '{"task": "reply with exactly {\"ok\": true}"}',
+        )
+    except LLMError as exc:
+        print(f"  result: FAILED — {exc}")
+        return 1
+    print(f"  result: ok in {response.latency_s:.2f}s, model reported as {response.model}")
+    print(f"  usage:  {response.usage or '(not reported)'}")
+    print(f"  body:   {response.text.strip()[:200]}")
     return 0
 
 
@@ -251,6 +316,16 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--no-state",
         action="store_true",
         help="do not read or write history; threshold rules only",
+    )
+    parser.add_argument("--no-brief", action="store_true", help="findings only, no brief")
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="build the brief from the rules alone, without calling a model",
+    )
+    parser.add_argument(
+        "--llm-recording",
+        help="replay recorded completions from a JSON file instead of calling a model",
     )
 
 

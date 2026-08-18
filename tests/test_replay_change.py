@@ -22,13 +22,13 @@ from pathlib import Path
 
 import pytest
 import yaml
-from leakcheck import assert_clean
 
 from watchdesk.collect import run_round
 from watchdesk.config import load_config
 from watchdesk.correlate import correlate
 from watchdesk.detect.rules import Severity, evaluate
 from watchdesk.detect.state import StateStore
+from watchdesk.leakcheck import assert_clean
 from watchdesk.redact import RedactionPolicy, Redactor
 from watchdesk.sources.shell import RecordedRunner
 

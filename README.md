@@ -7,11 +7,12 @@ changed.
 
 It is not a dashboard. Dashboards were the problem.
 
-> **Status: staged build, stage 2 of 5 complete.**
-> Collection and change detection work end to end: `watchdesk once` runs
-> against this host, and `watchdesk replay` reproduces the August incident and
-> its resolution from two real captures, naming the config edit that explains
-> the change. The LLM brief and the Discord sink land in stages 3–4; the map
+> **Status: staged build, stage 3 of 5 complete.**
+> Collection, change detection and the evidence-bound brief work end to end.
+> `watchdesk replay` reproduces the August incident and its resolution from two
+> real captures, names the config edit that explains the change, and produces a
+> triage summary in which every sentence that survives can name the measurement
+> it rests on. The Discord sink and systemd units land in stage 4; the map
 > below marks what exists today. Nothing in this README describes behaviour
 > that is not in the tree.
 
@@ -135,8 +136,9 @@ src/watchdesk/
     rules.py          thresholds, rate-of-change, silence       [stage 2] DONE
   correlate.py        anomaly x recent change                   [stage 2] DONE
   redact.py           IP / hostname / mailbox / path            [stage 0] DONE
-  llm.py              OpenAI-compatible client                  [stage 3]
-  brief.py            triage summary with evidence binding      [stage 3]
+  leakcheck.py        independent exit check; runtime + CI      [stage 3] DONE
+  llm.py              OpenAI-compatible client                  [stage 3] DONE
+  brief.py            triage summary with evidence binding      [stage 3] DONE
   sinks/              discord, stdout                           [stage 4]
 ```
 
@@ -246,6 +248,49 @@ The list of changes it knows about is deliberately short, and every one of them
 is something watchdesk already measures for another reason. Nothing here reads
 shell history or package logs — a short list of changes it is certain about
 beats a long list it has to guess at.
+
+## The brief, and what it is allowed to say
+
+The findings are arithmetic over measurements; they are true by construction. A
+language model adds triage prose — which of five findings to read first, what
+they plausibly mean together, what to check next. That is genuinely useful, and
+it is also exactly the kind of text that invents a number nobody measured.
+
+So every statement the model returns is checked mechanically before it reaches
+the output:
+
+| The model says | What happens |
+| --- | --- |
+| a claim with no citation | **dropped** |
+| a claim citing a ref that does not exist in this round | **dropped** — a fabricated citation survives a skim, because the reader sees a reference and stops checking |
+| an observation asserting a number nothing measured | **dropped** |
+| a number that *was* measured but is not in the refs it cited | kept, downgraded to **hypothesis**, with the reason attached |
+| anything causal, however well cited | kept, marked **hypothesis** — evidence can support "210 failures were on submission"; it cannot make "because the attackers migrated" into an observation |
+| a headline containing an unsupported number | replaced by one derived from the rules |
+
+The split between the third and fourth rows is deliberate and came from
+watching a real model on this data: it wrote "210 of 212" while citing only the
+signal worth 210. Both numbers were real; the citation was one ref short.
+Treating that as a fabrication would bury actual fabrications in noise, so it
+is a lesser fault with its own wording.
+
+If the endpoint is unreachable, returns something unparseable, or has every
+claim rejected, the brief is still produced from the findings alone and says
+so. The rules are the product; the prose is a convenience.
+
+The model is only called once a rule has fired at or above `llm.min_severity`.
+On a quiet server it is never called at all.
+
+### Redaction at that exit
+
+`llm.py` redacts its own arguments and then runs `leakcheck.py` over the result
+before opening a socket. A caller that forgets to redact still cannot leak, and
+a bug in `redact.py` raises instead of publishing.
+
+`leakcheck.py` deliberately reimplements the patterns rather than importing
+them from `redact.py`. Sharing them would be tidier and useless: a mistake in a
+shared pattern would hide itself, since the same blind spot that failed to
+redact a value would fail to detect it afterwards.
 
 ## Redaction contract
 
@@ -387,6 +432,49 @@ What is *absent* matters as much. Real authentication failures went 212 → 226
 across those two days — the traffic barely moved; what changed was how much of
 it fail2ban could see — and no rule reports an attack that did not happen.
 `tests/test_replay_change.py` asserts that silence explicitly.
+
+### The brief, offline
+
+```bash
+watchdesk --config config/watchdesk.example.yaml replay \
+  tests/fixtures/2026-08-fail2ban-gap/ --llm-recording tests/fixtures/llm/gap-brief.json
+```
+
+The recorded completion is hand-written to contain every failure mode at once.
+What comes out:
+
+```
+[CRITICAL] postfix-docker matched 2 of 212 authentication failures this window
+  - 210 authentication failures on submission/smtpd are present in the log ...
+      [observation/derived] cites: fail2ban.jail.uncounted_failures{jail=postfix-docker}, ...
+  ? 210 of 212 authentication failures in the window were on submission/smtpd.
+      [observation/hypothesis] cites: fail2ban.jail.uncounted_failures_by_service{...}
+      note: cited imprecisely: 212 was measured this round but is not in the evidence this claim cites
+  ? The pattern is consistent with scanners having moved from port 25 ...
+      [explanation/hypothesis] cites: fail2ban.jail.uncounted_failures_by_service{...}
+  3 claim(s) dropped for lack of evidence:
+      x The mail server is almost certainly compromised and mail is being relayed.
+        cites no evidence
+      x Outbound delivery volume tripled over the same window.
+        cites 'postfix.messages_sent_per_day{container=postfix}', which is not in this round
+      x There were 4821 failed logins from a single address.
+        states 4821, which nothing in this round measured
+```
+
+`tests/test_brief.py` asserts each of those outcomes. Every test in this
+project's LLM layer runs against recorded completions, so the assertions are
+about watchdesk's verification rather than about any model's behaviour on the
+day.
+
+### Against a real endpoint
+
+```bash
+watchdesk doctor --live
+```
+
+Sends fixed text with nothing from this host in it — a reachability check
+should not be the thing that ships a log line somewhere — and reports latency,
+the model the endpoint claims to have used, and token usage.
 
 ### Against the live host
 

@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "A recorded completion for the 2026-08-fail2ban-gap replay, hand-written to",
+    "contain the failure modes that matter rather than a model's best day.",
+    "Claims 1 and 2 are well cited. Claim 3 cites nothing. Claim 4 cites a ref",
+    "that does not exist. Claim 5 asserts a number nothing measured. Claim 6 is a",
+    "reasonable causal story with a real citation and must still come out as a",
+    "hypothesis. Claim 7 is the pattern a real model produced against this very",
+    "fixture: the numbers are right and the citation is one ref short of",
+    "supporting them."
+  ],
+  "responses": [
+    {
+      "headline": "postfix-docker matched 2 of 212 authentication failures this window",
+      "headline_refs": [
+        "fail2ban.uncounted_failures",
+        "fail2ban.jail.filter_would_match{jail=postfix-docker}"
+      ],
+      "claims": [
+        {
+          "text": "210 authentication failures on submission/smtpd are present in the log the jail reads and are not matched by its filter.",
+          "kind": "observation",
+          "refs": [
+            "fail2ban.jail.uncounted_failures{jail=postfix-docker}",
+            "fail2ban.uncounted_failures"
+          ]
+        },
+        {
+          "text": "The jail is enabled and using the filter it is configured to expect, so nothing in its own status reflects this.",
+          "kind": "observation",
+          "refs": [
+            "fail2ban.jail.filter_as_expected{jail=postfix-docker}"
+          ]
+        },
+        {
+          "text": "The mail server is almost certainly compromised and mail is being relayed.",
+          "kind": "observation",
+          "refs": []
+        },
+        {
+          "text": "Outbound delivery volume tripled over the same window.",
+          "kind": "observation",
+          "refs": [
+            "postfix.messages_sent_per_day{container=postfix}"
+          ]
+        },
+        {
+          "text": "There were 4821 failed logins from a single address.",
+          "kind": "observation",
+          "refs": [
+            "fail2ban.jail.observed_failures{jail=postfix-docker}"
+          ]
+        },
+        {
+          "text": "The pattern is consistent with scanners having moved from port 25 to the submission listener.",
+          "kind": "explanation",
+          "refs": [
+            "fail2ban.jail.uncounted_failures_by_service{jail=postfix-docker,service=submission/smtpd}"
+          ]
+        },
+        {
+          "text": "210 of 212 authentication failures in the window were on submission/smtpd.",
+          "kind": "observation",
+          "refs": [
+            "fail2ban.jail.uncounted_failures_by_service{jail=postfix-docker,service=submission/smtpd}"
+          ]
+        }
+      ]
+    }
+  ]
+}

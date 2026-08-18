@@ -51,6 +51,21 @@ fail2ban:
   # that you lose the fourth opinion.
   run_fail2ban_regex: true
 
+# When to call a language model. The model is only consulted once the rules
+# have already decided something is worth reporting: it costs money per round,
+# and a summary generated every five minutes about nothing teaches the reader
+# to skip it. Set min_severity to "critical" to consult it even less often, or
+# enabled: false to never consult it — the findings do not depend on it.
+#
+# The endpoint itself comes from the environment (LLM_BASE_URL, LLM_MODEL,
+# LLM_API_KEY), never from this file.
+llm:
+  enabled: true
+  min_severity: warning
+  timeout_s: 60
+  max_output_tokens: 900
+  temperature: 0.1
+
 # Identities that belong to the operator. These are masked as "own" rather
 # than pseudonymised, so a report reads "the operator's mailbox" instead of
 # presenting you as another anonymous third party.

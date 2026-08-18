@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 import yaml
-from leakcheck import assert_clean
 
 from watchdesk.collect import run_round
 from watchdesk.config import load_config
+from watchdesk.leakcheck import assert_clean
 from watchdesk.redact import RedactionPolicy, Redactor
 from watchdesk.sources.base import SignalKind
 from watchdesk.sources.shell import RecordedRunner

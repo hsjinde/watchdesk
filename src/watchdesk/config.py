@@ -185,6 +185,25 @@ class RulesConfig(BaseModel):
     )
 
 
+class LLMConfig(BaseModel):
+    """When to call a language model, and how much rope to give it."""
+
+    enabled: bool = True
+
+    #: The model is only called when the rules have already decided something
+    #: is worth reporting. Two reasons, and the second is the bigger one: it
+    #: costs money per round, and a summary generated every five minutes when
+    #: nothing is happening trains the reader to skip it.
+    min_severity: str = "warning"
+
+    timeout_s: float = 60.0
+    max_output_tokens: int = 900
+
+    #: Low, not zero. This is triage prose over fixed evidence, not a task
+    #: where sampling variety buys anything.
+    temperature: float = 0.1
+
+
 class RedactionConfig(BaseModel):
     """Which identities are the operator's own, and therefore masked rather
     than pseudonymised."""
@@ -219,6 +238,7 @@ class Config(BaseModel):
     fail2ban: Fail2banConfig = Field(default_factory=Fail2banConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     rules: RulesConfig = Field(default_factory=RulesConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     redaction: RedactionConfig = Field(default_factory=RedactionConfig)
 
     #: How far back a round looks. Rates are computed over this window, and
