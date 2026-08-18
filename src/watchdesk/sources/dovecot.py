@@ -105,9 +105,11 @@ class DovecotSource:
             note=(
                 None
                 if read.wire_format
-                else "Reading through `docker logs` loses the exact bytes fail2ban matches, "
-                "which disables the filter cross-check. Usually means the process cannot read "
-                "/var/lib/docker/containers."
+                else (
+                    f"{read.fallback_reason}. Reading through `docker logs` gives the decoded "
+                    "message rather than the bytes fail2ban matches, which disables the filter "
+                    "cross-check. Grant read access to the json-file log to restore it."
+                )
             ),
         )
 

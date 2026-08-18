@@ -267,3 +267,16 @@ def test_the_fallback_declares_itself_not_wire_format() -> None:
 def test_reading_the_json_file_is_wire_format() -> None:
     lines = as_lines("Jul 31 01:00:00 mail postfix/smtpd[1]: warning: x")
     assert all(line.wire_format for line in lines)
+
+
+def test_a_successful_fallback_is_not_an_error() -> None:
+    """The read was degraded, not failed.
+
+    Filing it as an error would give every non-root deployment a permanent
+    warning on every round, and a reader who sees the same warning forever
+    stops reading the warnings that matter. The loss is reported where it
+    actually bites — log_read_mode, and cross_check_unavailable in fail2ban.
+    """
+    read = dockerlog.load(FakeRunner(TIMESTAMPED), "postfix")
+    assert read.problems == []
+    assert read.fallback_reason and "PermissionError" in read.fallback_reason

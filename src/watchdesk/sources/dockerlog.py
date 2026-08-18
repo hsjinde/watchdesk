@@ -113,6 +113,13 @@ class LogRead:
     lines: list[LogLine]
     problems: list[str]
 
+    #: Why the on-disk log could not be used, when a fallback succeeded
+    #: anyway. Deliberately *not* a problem: the collection worked, in a
+    #: degraded mode. Filing it as an error would give every non-root
+    #: deployment a permanent warning every round, which is how a reader
+    #: learns to ignore the warnings that matter.
+    fallback_reason: str | None = None
+
     @property
     def wire_format(self) -> bool:
         """Whether these lines carry the bytes fail2ban actually matches."""
@@ -168,14 +175,18 @@ def load(
     resolved = path or container_log_path(runner, container)
 
     text: str | None = None
+    fallback_reason: str | None = None
     if resolved:
         try:
             text = runner.read_text(resolved)
         except (CommandDenied, FileNotFoundError, OSError) as exc:
-            problems.append(f"could not read {resolved}: {exc}")
+            fallback_reason = f"could not read {resolved}: {type(exc).__name__}"
+    else:
+        fallback_reason = "docker did not report a log path for this container"
 
     if text is not None:
-        return LogRead(*_parse_wire(text, since, problems))
+        lines, problems = _parse_wire(text, since, problems)
+        return LogRead(lines, problems)
 
     # Fallback: the json-file is unreadable — which is the ordinary case for
     # anything not running as root. `docker logs` gives back the decoded
@@ -189,10 +200,10 @@ def load(
         result = runner.run(["docker", "logs", "--timestamps", container])
     except (CommandDenied, FileNotFoundError) as exc:
         problems.append(f"could not read the log of container {container}: {exc}")
-        return LogRead([], problems)
+        return LogRead([], problems, fallback_reason)
     if not result.ok:
         problems.append(f"docker logs {container} exited {result.returncode}")
-        return LogRead([], problems)
+        return LogRead([], problems, fallback_reason)
 
     lines: list[LogLine] = []
     undecodable = 0
@@ -208,7 +219,7 @@ def load(
         lines.append(parsed)
     if undecodable:
         problems.append(f"{undecodable} line(s) from docker logs had no parseable timestamp")
-    return LogRead(lines, problems)
+    return LogRead(lines, problems, fallback_reason)
 
 
 def _parse_wire(
