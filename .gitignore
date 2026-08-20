@@ -6,6 +6,12 @@
 .env.*
 !.env.example
 
+# The filled-in config names the host it watches: the real domain, the certbot
+# volume path, the jails that actually exist here. config/watchdesk.example.yaml
+# is the committed one and carries the same structure with none of that.
+# Anchored, so the .example.yaml beside it is untouched.
+/config/watchdesk.yaml
+
 # Fixture bake artefacts: the real -> placeholder mapping is the reverse
 # lookup table for anything committed under tests/fixtures/. Keeping it out
 # of the repo is the whole point.
