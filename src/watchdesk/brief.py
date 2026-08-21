@@ -78,6 +78,35 @@ Reply with a single JSON object, no prose around it:
 At most six claims. Shorter is better."""
 
 
+#: Appended to the system prompt when ``llm.language`` is set.
+#:
+#: Only the prose is translated. Two things must survive a language change
+#: untouched, and the second one is the reason this is a template rather than
+#: a free-form instruction:
+#:
+#: * refs, signal names, commands and container names are identifiers. The
+#:   reader greps the journal for ``disk.space_low``; a translated copy of it
+#:   matches nothing, and ``catalogue.resolve`` would reject it outright.
+#: * digits must stay ASCII. ``_NUMBER`` is what stops the model asserting a
+#:   measurement nobody took, and it matches ``\\d`` only — a claim written
+#:   with full-width or spelled-out numerals carries a number that the check
+#:   cannot see, so it would pass verification without ever being checked.
+#:   That is a silent hole in the one guard that matters, not a cosmetic bug.
+_LANGUAGE_CLAUSE = """
+
+Write "headline" and every claim "text" in {language}. This changes the prose
+only:
+
+- Keep all digits as ASCII numerals (97, 0.0094). Never spell a number out in
+  words and never use full-width digits — the numbers in your text are checked
+  mechanically against what was measured, and a number written any other way
+  defeats that check instead of passing it.
+- Do not translate refs, signal names, rule names, commands, container names,
+  file paths, or log excerpts. Copy them exactly as given, even mid-sentence.
+- The JSON keys and the "kind" values stay exactly as specified above in
+  English: observation, explanation, next_step."""
+
+
 @dataclass(frozen=True)
 class Claim:
     text: str
@@ -380,8 +409,11 @@ def build_brief(
 
     catalogue = build_catalogue(findings, signals)
     try:
+        system = SYSTEM_PROMPT
+        if config.llm.language:
+            system += _LANGUAGE_CLAUSE.format(language=config.llm.language)
         response = client.complete(
-            SYSTEM_PROMPT, _prompt(findings, catalogue, config.window_minutes)
+            system, _prompt(findings, catalogue, config.window_minutes)
         )
         body = response.json()
     except LLMError as exc:

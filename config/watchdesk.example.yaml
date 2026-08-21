@@ -109,12 +109,19 @@ alertmanager:
 #
 # The endpoint itself comes from the environment (LLM_BASE_URL, LLM_MODEL,
 # LLM_API_KEY), never from this file.
+#
+# `language` moves the model's prose and nothing else. Rule titles and signal
+# names stay in English because they are what a reader greps the journal for,
+# and the numbers stay ASCII because the fabrication check reads digits — a
+# claim written with full-width numerals carries a measurement the check
+# cannot see, which is worse than one it rejects. Empty means English.
 llm:
   enabled: true
   min_severity: warning
   timeout_s: 60
   max_output_tokens: 900
   temperature: 0.1
+  language: ""            # e.g. "Traditional Chinese (Taiwan)"
 
 # Identities that belong to the operator. These are masked as "own" rather
 # than pseudonymised, so a report reads "the operator's mailbox" instead of

@@ -261,6 +261,15 @@ class LLMConfig(BaseModel):
     timeout_s: float = 60.0
     max_output_tokens: int = 900
 
+    #: What language the brief's prose is written in, named the way you would
+    #: name it to a person ("Traditional Chinese (Taiwan)"). Empty means the
+    #: prompt says nothing about language and the model answers in English.
+    #:
+    #: Only the model's prose moves. Rule titles stay in English on purpose —
+    #: they are built around signal names like `disk.space_low`, and a reader
+    #: who greps the journal for one has to find the finding that carries it.
+    language: str = ""
+
     #: Low, not zero. This is triage prose over fixed evidence, not a task
     #: where sampling variety buys anything.
     temperature: float = 0.1

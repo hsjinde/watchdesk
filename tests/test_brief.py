@@ -341,3 +341,65 @@ def test_the_rendered_brief_marks_hypotheses_visibly(config) -> None:
     rendered = build_brief(config, [FINDING], ROUND_SIGNALS, NOW, client=client).render()
     assert "hypothesis" in rendered
     assert "dropped for lack of evidence" in rendered
+
+
+# --------------------------------------------------------------------------
+# Writing the prose in another language
+# --------------------------------------------------------------------------
+
+
+def test_the_language_clause_is_absent_unless_configured(config) -> None:
+    client = RecordedLLM(Path(__file__).parent / "fixtures" / "llm" / "gap-brief.json")
+    build_brief(config, [FINDING], ROUND_SIGNALS, NOW, client=client)
+    system, _ = client.requests[0]
+    assert "Write \"headline\"" not in system
+
+
+def test_the_language_clause_names_the_language_and_pins_the_digits(config) -> None:
+    """The digit rule is the load-bearing half of this clause.
+
+    ``_NUMBER`` matches ASCII digits only, so a claim written with full-width
+    or spelled-out numerals carries an assertion that the fabrication check
+    cannot see — it would pass verification without ever being checked, which
+    is worse than failing it.
+    """
+    config.llm.language = "Traditional Chinese (Taiwan)"
+    client = RecordedLLM(Path(__file__).parent / "fixtures" / "llm" / "gap-brief.json")
+    build_brief(config, [FINDING], ROUND_SIGNALS, NOW, client=client)
+    system, _ = client.requests[0]
+
+    assert "Traditional Chinese (Taiwan)" in system
+    assert "ASCII numerals" in system
+    assert "full-width" in system
+    # The identifiers the reader greps for must survive translation.
+    assert "Do not translate refs" in system
+    # The original contract is still in force, not replaced by the clause.
+    assert "Do not state any number that does not appear" in system
+
+
+def test_verification_is_unchanged_by_a_claim_written_in_chinese(config) -> None:
+    """The guard reads digits and refs, not English prose, so a translated
+    brief is checked exactly as hard as an English one."""
+    catalogue = build_catalogue([FINDING], ROUND_SIGNALS)
+    ref = "fail2ban.jail.uncounted_failures{jail=postfix-docker}"
+
+    supported, reason = verify_claim(
+        {"text": "在這個窗口內有 210 次認證失敗未被計數。", "kind": "observation", "refs": [ref]},
+        catalogue,
+    )
+    assert reason is None
+    assert supported is not None and supported.confidence is Confidence.DERIVED
+
+    fabricated, reason = verify_claim(
+        {"text": "有 4821 次來自單一位址的登入失敗。", "kind": "observation", "refs": [ref]},
+        catalogue,
+    )
+    assert fabricated is None
+    assert "4821" in reason
+
+    uncited, reason = verify_claim(
+        {"text": "郵件伺服器幾乎確定已被入侵。", "kind": "observation", "refs": []},
+        catalogue,
+    )
+    assert uncited is None
+    assert reason == "cites no evidence"
