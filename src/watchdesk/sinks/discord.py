@@ -46,6 +46,16 @@ _COLOURS = {
     Severity.INFO: 0x808080,
 }
 
+#: The same four levels again, for the reader who is skimming on a phone and
+#: has not read a word yet. The embed's colour bar says this too, but only for
+#: the message as a whole; per finding, this is all there is.
+_MARKS = {
+    Severity.CRITICAL: "🔴",
+    Severity.WARNING: "🟠",
+    Severity.NOTICE: "🔵",
+    Severity.INFO: "⚪",
+}
+
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -53,39 +63,115 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+_TRUNCATED = "_truncated_"
+
+
+def _fit(blocks: list[str], limit: int) -> str:
+    """Drop whole blocks rather than cutting one in half.
+
+    Blocks are emitted findings-first, so dropping from the end drops the
+    model's prose before it drops a measurement — the same order the old
+    character-wise cut had, but without leaving half a quoted line behind.
+    A block too long on its own is thinned line by line instead, so what
+    survives is the severity and the title rather than half a quoted number.
+    """
+    joined = "\n\n".join(blocks)
+    if len(joined) <= limit:
+        return joined
+
+    kept: list[str] = []
+    used = 0
+    for block in blocks:
+        cost = len(block) + (2 if kept else 0)
+        if used + cost > limit:
+            break
+        kept.append(block)
+        used += cost
+
+    if not kept:
+        return _fit_lines(blocks[0], limit)
+    if used + 2 + len(_TRUNCATED) <= limit:
+        kept.append(_TRUNCATED)
+    return "\n\n".join(kept)
+
+
+def _fit_lines(block: str, limit: int) -> str:
+    """Thin one block to whole lines. Only its first line is ever cut mid-way,
+    because a message with no title at all says nothing."""
+    kept: list[str] = []
+    used = 0
+    for line in block.split("\n"):
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > limit:
+            break
+        kept.append(line)
+        used += cost
+    if not kept:
+        return _truncate(block, limit)
+    return "\n".join(kept)
+
+
 def format_payload(brief: Brief, max_chars: int) -> dict[str, Any]:
     """Build the webhook body.
 
-    Findings come before the model's prose on purpose. The findings are
-    measurements; the prose is a convenience, and if the message gets truncated
-    the convenience is what should be lost.
+    Two decisions about the layout, both about a reader who is skimming:
+
+    *   **Findings come before the model's prose.** The findings are
+        measurements; the prose is a convenience, and if the message gets
+        truncated the convenience is what should be lost.
+    *   **They do not look alike.** A finding is arithmetic over what was
+        measured; a claim is a language model's triage of it. Formatting them
+        identically invites the reader to trust them equally, which is the one
+        thing this message must not ask for.
+
+    Supporting lines are blockquoted rather than indented, because leading
+    whitespace is not layout here: it renders as a space, not as a level.
+
+    A correlation is printed once. ``correlate.py`` attaches the same
+    surrounding event to every finding it plausibly explains, which is right
+    for the data and wrong for the message: repeated verbatim under three
+    findings, one config edit fills more of the screen than the three
+    measurements it relates to, and the reader starts skipping quoted lines.
     """
-    lines: list[str] = []
+    blocks: list[str] = []
+    seen_correlations: set[str] = set()
+
     for finding in brief.findings:
-        lines.append(f"**[{str(finding.severity).upper()}]** {finding.title}")
+        lines = [
+            f"{_MARKS.get(finding.severity, _MARKS[Severity.INFO])} "
+            f"**{str(finding.severity).upper()}** · {finding.title}"
+        ]
         if finding.baseline:
-            lines.append(f"　baseline: {finding.baseline}")
-        for correlation in finding.correlations[:2]:
-            lines.append(f"　correlation: {correlation}")
+            lines.append(f"> baseline · {finding.baseline}")
+        fresh = [item for item in finding.correlations if item not in seen_correlations]
+        for correlation in fresh[:2]:
+            lines.append(f"> alongside · {correlation}")
+            seen_correlations.add(correlation)
+        blocks.append("\n".join(lines))
 
     if brief.claims:
-        lines.append("")
+        lines = ["**Triage** — the model's reading of the findings above"]
         for claim in brief.claims:
-            marker = "?" if claim.confidence is Confidence.HYPOTHESIS else "・"
-            suffix = " *(hypothesis)*" if claim.confidence is Confidence.HYPOTHESIS else ""
-            lines.append(f"{marker} {claim.text}{suffix}")
+            if claim.confidence is Confidence.HYPOTHESIS:
+                lines.append(f"• *Hypothesis* · {claim.text}")
+            else:
+                lines.append(f"• {claim.text}")
+        blocks.append("\n".join(lines))
 
+    trailer: list[str] = []
     if brief.rejected:
-        lines.append("")
-        lines.append(
-            f"_{len(brief.rejected)} model claim(s) dropped for lack of evidence._"
-        )
+        count = len(brief.rejected)
+        noun = "claim" if count == 1 else "claims"
+        trailer.append(f"_{count} model {noun} dropped for lack of evidence._")
     if brief.llm_error:
-        lines.append("")
-        lines.append("_Summary written from the rules; the model was unavailable._")
+        trailer.append("_Summary written from the rules; the model was unavailable._")
+    if trailer:
+        blocks.append("\n".join(trailer))
 
-    description = _truncate("\n".join(lines), min(max_chars, _DESCRIPTION_LIMIT))
-    footer = f"watchdesk · {len(brief.findings)} finding(s)"
+    description = _fit(blocks, min(max_chars, _DESCRIPTION_LIMIT))
+
+    count = len(brief.findings)
+    footer = f"watchdesk · {count} finding" + ("" if count == 1 else "s")
     if brief.model:
         footer += f" · {brief.model}"
     if brief.headline_source != "llm":

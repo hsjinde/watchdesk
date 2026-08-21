@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from watchdesk.brief import Brief
+from watchdesk.brief import Brief, Claim, RejectedClaim
 from watchdesk.config import load_config
 from watchdesk.detect.rules import Confidence, Finding, Severity
 from watchdesk.detect.state import StateStore
@@ -21,6 +21,7 @@ from watchdesk.leakcheck import LeakError
 from watchdesk.redact import RedactionPolicy, Redactor
 from watchdesk.sinks import DiscordSink, suppression_digest
 from watchdesk.sinks.base import record_sent, should_send
+from watchdesk.sinks.discord import format_payload
 from watchdesk.sources.base import Evidence
 
 NOW = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
@@ -141,7 +142,7 @@ def test_a_delivered_message_carries_the_findings_first(config, store, redactor)
     assert result.sent
     (_, payload) = transport.calls[0]
     description = payload["embeds"][0]["description"]
-    assert description.startswith("**[CRITICAL]**")
+    assert description.startswith("🔴 **CRITICAL** ·")
     assert "postfix-docker is blind" in description
 
 
@@ -227,3 +228,160 @@ def test_a_real_brief_serialises_clean(config, store, redactor) -> None:
         )
     )
     assert_clean(json.dumps(transport.calls[0][1], ensure_ascii=False))
+
+
+# --------------------------------------------------------------------------
+# Formatting: what the message looks like to a tired reader
+# --------------------------------------------------------------------------
+#
+# The delivery mechanics above decide *whether* a message is worth sending.
+# These decide whether it is worth reading once it arrives, which is the same
+# question one step later: a channel nobody can skim gets skimmed anyway, and
+# then the finding that mattered was on screen and went unread.
+
+
+def loaded_brief() -> Brief:
+    """One of each thing the format has to keep apart."""
+    return Brief(
+        generated_at=NOW,
+        headline="submission is taking failures fail2ban cannot see",
+        headline_source="llm",
+        findings=(
+            Finding(
+                rule="fail2ban.uncounted_failures",
+                severity=Severity.CRITICAL,
+                confidence=Confidence.DERIVED,
+                title="postfix-docker is blind to 210 failures",
+                detail="detail",
+                baseline="7d median 12/h, now 210/h",
+                correlations=("postfix.submission_failures rose in the same window",),
+            ),
+            Finding(
+                rule="disk.growth",
+                severity=Severity.WARNING,
+                confidence=Confidence.DERIVED,
+                title="/var is 87% full",
+                detail="detail",
+            ),
+        ),
+        claims=(
+            Claim(
+                text="Look at the submission listener first.",
+                kind="observation",
+                confidence=Confidence.DERIVED,
+                refs=("fail2ban.uncounted_failures",),
+            ),
+            Claim(
+                text="The jail's logpath no longer matches where postfix writes.",
+                kind="explanation",
+                confidence=Confidence.HYPOTHESIS,
+                refs=("fail2ban.uncounted_failures",),
+            ),
+        ),
+        rejected=(RejectedClaim(text="the attackers moved to port 587", reason="cites nothing"),),
+        model="claude-opus-5",
+    )
+
+
+def test_each_finding_is_its_own_block() -> None:
+    """Two findings run together are read as one, and the second one loses."""
+    description = format_payload(loaded_brief(), 4096)["embeds"][0]["description"]
+    head, _, rest = description.partition("postfix-docker is blind to 210 failures")
+    assert "\n\n" in rest.split("/var is 87% full")[0]
+
+
+def test_supporting_lines_are_quoted_rather_than_indented_with_whitespace() -> None:
+    """Discord does not lay out leading whitespace, so an indent made of it is
+    not structure — it is a space. A blockquote is structure."""
+    description = format_payload(loaded_brief(), 4096)["embeds"][0]["description"]
+    assert "\u3000" not in description
+    assert "> baseline · 7d median 12/h, now 210/h" in description
+    assert "> alongside · postfix.submission_failures rose in the same window" in description
+
+
+def test_one_correlation_shared_by_three_findings_is_printed_once() -> None:
+    """``correlate.py`` attaches the same surrounding event to every finding it
+    plausibly explains. Printed under each of them, one config edit outweighs
+    the three measurements it relates to, and quoted lines stop being read."""
+    edit = "[config_edit] filter.d/postfix-docker.conf changed between rounds"
+    shared = brief(
+        *(
+            Finding(
+                rule=f"rule.{index}",
+                severity=Severity.WARNING,
+                confidence=Confidence.DERIVED,
+                title=f"finding {index}",
+                detail="detail",
+                correlations=(edit,),
+            )
+            for index in range(3)
+        )
+    )
+    description = format_payload(shared, 4096)["embeds"][0]["description"]
+    assert description.count(edit) == 1
+    assert description.count("finding ") == 3
+
+
+def test_severity_is_visible_before_the_title_is_read() -> None:
+    description = format_payload(loaded_brief(), 4096)["embeds"][0]["description"]
+    assert description.startswith("🔴 **CRITICAL** · postfix-docker is blind")
+    assert "🟠 **WARNING** · /var is 87% full" in description
+
+
+def test_the_model_s_prose_is_labelled_as_the_model_s() -> None:
+    """The findings are arithmetic and the claims are a language model's
+    triage. They were formatted identically, which is the one thing this
+    message must not do."""
+    description = format_payload(loaded_brief(), 4096)["embeds"][0]["description"]
+    assert "**Triage**" in description
+    assert description.index("postfix-docker is blind") < description.index("**Triage**")
+
+
+def test_a_hypothesis_says_so_in_words_rather_than_in_punctuation() -> None:
+    description = format_payload(loaded_brief(), 4096)["embeds"][0]["description"]
+    assert "*Hypothesis* · The jail's logpath" in description
+    assert "・" not in description
+    assert "\n? " not in description
+
+
+def test_truncation_drops_the_prose_before_it_drops_a_measurement() -> None:
+    """The findings are the product; the prose is a convenience. If the message
+    will not fit, the convenience is what should be lost.
+
+    The width here is chosen so that both findings fit and the triage does not
+    — a width that only fits *one* block would pass this test for the wrong
+    reason, by dropping everything after the first finding.
+    """
+    description = format_payload(loaded_brief(), 240)["embeds"][0]["description"]
+    assert "postfix-docker is blind" in description
+    assert "> baseline · 7d median 12/h, now 210/h" in description
+    assert "/var is 87% full" in description
+    assert "Triage" not in description
+    assert description.endswith("_truncated_")
+
+
+def test_a_truncated_message_does_not_end_mid_quote() -> None:
+    """A half-cut blockquote reads worse than the indent it replaced: the
+    reader cannot tell whether the number was small or the line was clipped."""
+    for width in range(60, 420, 7):
+        description = format_payload(loaded_brief(), width)["embeds"][0]["description"]
+        last = description.rsplit("\n", 1)[-1]
+        if last.startswith(">"):
+            assert not last.endswith("..."), f"quoted line cut at width {width}: {last!r}"
+
+
+def test_a_finding_too_long_to_fit_keeps_its_title_and_drops_its_support() -> None:
+    description = format_payload(loaded_brief(), 60)["embeds"][0]["description"]
+    assert description == "🔴 **CRITICAL** · postfix-docker is blind to 210 failures"
+
+
+def test_a_title_too_long_to_fit_is_cut_rather_than_dropped() -> None:
+    """Truncated evidence beats an empty message."""
+    description = format_payload(loaded_brief(), 40)["embeds"][0]["description"]
+    assert description.startswith("🔴 **CRITICAL** · postfix")
+    assert description.endswith("...")
+
+
+def test_the_footer_counts_one_finding_in_the_singular() -> None:
+    payload = format_payload(brief(finding()), 4096)
+    assert payload["embeds"][0]["footer"]["text"].startswith("watchdesk · 1 finding ·")
